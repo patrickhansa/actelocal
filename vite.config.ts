@@ -54,6 +54,8 @@ const pages = {
   home: resolve(root, 'index.html'),
   compressPdf: resolve(root, 'compress-pdf/index.html'),
   photosToPdf: resolve(root, 'photos-to-pdf/index.html'),
+  // Without a 404.html, Cloudflare Pages serves the home page for every unknown URL.
+  notFound: resolve(root, '404.html'),
 };
 
 // `--mode harness` also builds the dev harness, into dist-harness/, so the engine can be
