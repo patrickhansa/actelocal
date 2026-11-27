@@ -11,14 +11,10 @@
 //
 // Set CHROME to the browser executable if it isn't in the default Windows location.
 
-import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { build, createServer, preview } from 'vite';
+import { launchChrome } from './chrome.mjs';
 
-const CHROME = process.env.CHROME ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const DEBUG_PORT = 9333;
 const DEV_PORT = 5199;
 const PROD = process.env.PROD === '1';
 
@@ -34,19 +30,15 @@ if (PROD) {
   server = await createServer({ server: { port: DEV_PORT, strictPort: true }, logLevel: 'warn' });
   await server.listen();
 }
-const profile = mkdtempSync(join(tmpdir(), 'actelocal-bench-'));
-// GPU=1 asks headless Chrome to use the real GPU, closer to what visitors' browsers do.
-const gpuFlags = process.env.GPU === '1' ? ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'] : [];
-const chrome = spawn(
-  CHROME,
-  ['--headless=new', ...gpuFlags, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${profile}`, '--no-first-run', 'about:blank'],
-  { stdio: 'ignore' },
-);
+const browser = await launchChrome();
 
 try {
-  const page = await connect();
+  const { page } = browser;
   // MAIN_THREAD=1 forces the encoder's main-thread fallback (no OffscreenCanvas).
-  await page.open(`http://localhost:${DEV_PORT}/dev/engine.html${process.env.MAIN_THREAD === '1' ? '?main-thread' : ''}`);
+  await page.open(
+    `http://localhost:${DEV_PORT}/dev/engine.html${process.env.MAIN_THREAD === '1' ? '?main-thread' : ''}`,
+    `typeof window.bench === 'function'`,
+  );
   const gpu = await page.evaluate(`(() => {
     const gl = document.createElement('canvas').getContext('webgl');
     const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
@@ -142,13 +134,9 @@ try {
       }
     }
   }
-  page.close();
 } finally {
-  const exited = new Promise((resolve) => chrome.once('exit', resolve));
-  chrome.kill();
-  await exited;
+  await browser.close();
   await server.close();
-  rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 /** Prints the functions with the most main-thread self time in a CPU profile. */
@@ -183,80 +171,4 @@ function printLongTasks(events) {
       .map((e) => `${e.name}${e.args?.data?.functionName ? `(${e.args.data.functionName})` : ''} ${(e.dur / 1000).toFixed(0)}ms`);
     console.log(`    ${(task.dur / 1000).toFixed(0)} ms: ${children.join(', ') || '(no child events)'}`);
   }
-}
-
-/** Minimal DevTools-protocol client for the first page target. */
-async function connect() {
-  let target;
-  for (let i = 0; i < 100 && !target; i++) {
-    try {
-      const targets = await (await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/list`)).json();
-      target = targets.find((t) => t.type === 'page');
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-  if (!target) throw new Error('Chrome did not start');
-
-  const ws = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = reject;
-  });
-  let nextId = 0;
-  const pending = new Map();
-  let traceEvents = [];
-  let traceDone = null;
-  ws.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    if (message.method === 'Tracing.dataCollected') {
-      traceEvents.push(...message.params.value);
-    } else if (message.method === 'Tracing.tracingComplete') {
-      traceDone?.(traceEvents);
-    } else if (message.id && pending.has(message.id)) {
-      pending.get(message.id)(message);
-      pending.delete(message.id);
-    } else if (message.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(message.params.type)) {
-      console.log(`  [page ${message.params.type}]`, message.params.args.map((a) => a.value ?? a.description).join(' '));
-    } else if (message.method === 'Runtime.exceptionThrown') {
-      console.log('  [page exception]', message.params.exceptionDetails.exception?.description);
-    }
-  };
-  const send = (method, params = {}) =>
-    new Promise((resolve, reject) => {
-      const id = ++nextId;
-      pending.set(id, (m) => (m.error ? reject(new Error(m.error.message)) : resolve(m.result)));
-      ws.send(JSON.stringify({ id, method, params }));
-    });
-  const evaluate = async (expression) => {
-    const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
-    return r.result.value;
-  };
-  await send('Runtime.enable');
-  return {
-    send,
-    evaluate,
-    async startTrace() {
-      traceEvents = [];
-      await send('Tracing.start', {
-        categories: 'devtools.timeline,disabled-by-default-devtools.timeline,v8.execute,blink,gpu',
-        transferMode: 'ReportEvents',
-      });
-    },
-    async stopTrace() {
-      const done = new Promise((resolve) => (traceDone = resolve));
-      await send('Tracing.end');
-      return done;
-    },
-    async open(url) {
-      await send('Page.navigate', { url });
-      for (let i = 0; i < 200; i++) {
-        if (await evaluate(`typeof window.bench === 'function'`).catch(() => false)) return;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      throw new Error(`${url} did not load`);
-    },
-    close: () => ws.close(),
-  };
 }

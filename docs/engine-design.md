@@ -152,7 +152,8 @@ The same scan jobs took 5–7 s before the search learned to jump and abandon, a
 inspectPdf(file: File): Promise<PdfInfo>   // call on file selection, to warn before compressing (§10)
 compressPdf(file: File, options: EngineOptions): Promise<EngineResult>
 photosToPdf(photos: PhotoInput[], options: EngineOptions & { layout: 'one-per-page' | 'two-per-page' }): Promise<EngineResult>
-warmUpPdf(): Promise<void>   // load pdf.js and start its workers in the background
+warmUp(options?: { pdf?: boolean }): Promise<void>
+                             // on page idle: start the encoding workers; with pdf, load pdf.js, its worker and decoders
 encoderInfo(): string        // where JPEG encoding runs: "4 workers" or "main thread"
 
 interface PdfInfo {
@@ -232,7 +233,8 @@ scripts/check-g4-tables.mjs   compares the G4 code tables with libtiff's
   - JPEG 2000 images
   - colour profiles
 
-  `vite.config.ts` serves them at `/pdfjs/wasm/` in dev and copies them there in the build, with their licences. They take about 420 KB and load only when a file needs them.
+  `vite.config.ts` serves them at `/pdfjs/<version>/wasm/` in dev and copies them there in the build, with their licences. The version in the path lets `_headers` mark them cacheable forever.
+- `warmUp({ pdf: true })` downloads the decoders (about 420 KB) into memory while the page is idle. pdf.js then gets them through a small `BinaryDataFactory` (`useWorkerFetch: false`) instead of fetching them itself. As a result, processing a file makes no network requests at all and works offline, which `scripts/ui-test.mjs` checks.
 - The CSP allows this with `script-src 'self' 'wasm-unsafe-eval'`. That directive allows compiling WebAssembly only, not JavaScript `eval`.
 - Font data and CMaps aren't shipped. They're only needed for PDFs with non-embedded fonts or Asian text, and pdf.js falls back to system fonts without them.
 

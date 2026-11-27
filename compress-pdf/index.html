@@ -8,6 +8,11 @@
       name="description"
       content="Micșorează un PDF scanat sub 500 KB, 1 MB, 2 MB sau 5 MB pentru SPV, ONRC sau înscrieri. Totul rulează în browser: fișierul nu se încarcă nicăieri."
     />
+    <link rel="canonical" href="https://actelocal.pages.dev/compress-pdf/" />
+    <meta property="og:title" content="Micșorează PDF sub limită – fără upload" />
+    <meta property="og:description" content="PDF-ul scanat, sub limita portalului, direct în browser. Fișierul nu pleacă de pe dispozitivul tău." />
+    <meta property="og:url" content="https://actelocal.pages.dev/compress-pdf/" />
+    <meta property="og:locale" content="ro_RO" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script type="module" src="/src/pages/compress-pdf.ts"></script>
   </head>
@@ -21,12 +26,63 @@
         Alegi PDF-ul (de obicei o scanare) și limita portalului. Primești un PDF care încape, iar fișierul nu pleacă de
         pe dispozitivul tău.
       </p>
-      <div id="app" class="placeholder">
-        <p>Instrumentul e în lucru. Revino în curând.</p>
+
+      <div id="app">
+        <noscript><p class="noscript">Instrumentul are nevoie de JavaScript. Activează-l și reîncarcă pagina.</p></noscript>
       </div>
+
+      <section class="faq">
+        <h2>Întrebări frecvente</h2>
+        <details>
+          <summary>Unde ajunge fișierul meu?</summary>
+          <p>
+            Nicăieri. PDF-ul este citit și micșorat chiar în browserul tău, pe dispozitivul tău. Nu există niciun server
+            care să-l primească, iar pagina are o regulă de securitate care îi interzice să trimită date în altă parte.
+            <a href="/#verifica">Vezi cum verifici singur.</a>
+          </p>
+        </details>
+        <details>
+          <summary>De ce nu mai pot selecta textul după micșorare?</summary>
+          <p>
+            Ca să încapă sub limită, fiecare pagină devine o imagine, la cea mai bună rezoluție care se potrivește. La
+            scanări nu se pierde nimic, pentru că și înainte erau imagini.
+          </p>
+        </details>
+        <details>
+          <summary>Ce limită are portalul la care încarc?</summary>
+          <p>
+            Fiecare portal are limita lui: de obicei o găsești lângă butonul de încărcare sau în mesajul de eroare. Alege
+            aceeași limită aici. Socotim 1 MB ca 1.000.000 de octeți, adică puțin sub cât socotesc unele portaluri, ca
+            fișierul să treacă oricum.
+          </p>
+        </details>
+        <details>
+          <summary>Documentul are semnătură electronică. Îl pot micșora?</summary>
+          <p>
+            Poți, dar fișierul nou nu mai este semnat, iar un portal care verifică semnătura îl va respinge. Dacă trebuie
+            depus semnat, încarcă originalul sau descarcă-l din nou de unde l-ai primit. Dacă fișierul e deja sub limită,
+            îl lăsăm neatins, cu semnătură cu tot.
+          </p>
+        </details>
+        <details>
+          <summary>Documentul meu e alb-negru. Rămâne la fel?</summary>
+          <p>
+            Da. Un document care e deja alb-negru (de exemplu, scanat alb-negru) este păstrat alb-negru, cu o compresie
+            făcută pentru text. Iese mult mai mic și mai clar decât ca fotografie.
+          </p>
+        </details>
+        <details>
+          <summary>Merge pe telefon?</summary>
+          <p>Da, în orice browser actual, pe Android și pe iPhone. Documentele lungi, de zeci de pagini, merg mai încet pe telefon.</p>
+        </details>
+        <details>
+          <summary>Costă ceva? Îmi trebuie cont?</summary>
+          <p>Nu și nu. ActeLocal este gratuit, fără cont și fără reclame, iar codul sursă este public.</p>
+        </details>
+      </section>
     </main>
     <footer class="site-footer">
-      <p>Totul rulează în browser: fără cont, fără upload, fără server.</p>
+      <p>Totul rulează în browser: fără cont, fără upload, fără server. <a href="/#verifica">Cum verifici</a></p>
       <p><a href="https://github.com/patrickhansa/actelocal">Cod sursă deschis (MIT)</a></p>
     </footer>
   </body>

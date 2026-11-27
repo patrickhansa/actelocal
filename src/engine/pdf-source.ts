@@ -1,15 +1,27 @@
 // PDF file → one PageSource per page, rendered by pdf.js. See docs/engine-design.md §3.
 // The only module that imports pdf.js, and it is loaded on demand.
 
-import { AnnotationMode, GlobalWorkerOptions, OPS, PDFWorker, getDocument, type PDFDocumentProxy } from 'pdfjs-dist';
+import {
+  AnnotationMode,
+  GlobalWorkerOptions,
+  OPS,
+  PDFWorker,
+  getDocument,
+  version as pdfjsVersion,
+  type PDFDocumentProxy,
+} from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { SCANNED_PAGE_COVERAGE, largestImageCoverage } from './classify';
 import { EngineError, type PageSource, type PdfInfo } from './types';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
-/** Where vite.config.ts serves pdf.js's WebAssembly decoders. */
-const WASM_URL = '/pdfjs/wasm/';
+/**
+ * Where vite.config.ts serves pdf.js's WebAssembly decoders. The version in the path lets
+ * browsers cache them for good (public/_headers), so they work offline once fetched.
+ */
+export const WASM_URL = `/pdfjs/${pdfjsVersion}/wasm/`;
+const WASM_FILES = ['jbig2.wasm', 'openjpeg.wasm', 'qcms_bg.wasm'];
 
 let sharedWorker: PDFWorker | null = null;
 
@@ -19,10 +31,47 @@ function pdfWorker(): PDFWorker {
   return sharedWorker;
 }
 
-/** Starts the pdf.js worker ahead of time. */
+/**
+ * Starts the pdf.js worker and loads its decoders into memory ahead of time, so the first
+ * PDF starts sooner and nothing at all is downloaded while a file is processed.
+ */
 export function warmUp(): void {
   pdfWorker();
+  for (const name of WASM_FILES) void wasmBytes(name).catch(() => undefined);
 }
+
+const wasmCache = new Map<string, Promise<Uint8Array>>();
+
+/** A decoder's bytes, downloaded once per visit. */
+function wasmBytes(name: string): Promise<Uint8Array> {
+  let bytes = wasmCache.get(name);
+  if (!bytes) {
+    bytes = fetch(WASM_URL + name)
+      .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(new Error(response.statusText))))
+      .then((buffer) => new Uint8Array(buffer));
+    bytes.catch(() => wasmCache.delete(name)); // allow a retry
+    wasmCache.set(name, bytes);
+  }
+  return bytes;
+}
+
+/**
+ * pdf.js asks this for its decoders (with `useWorkerFetch: false`) instead of fetching them
+ * itself, so they come from memory. Hands out copies: pdf.js may transfer the buffer away.
+ */
+class PreloadedBinaryData {
+  async fetch({ kind, filename }: { kind: string; filename: string }): Promise<Uint8Array> {
+    if (kind !== 'wasmUrl') throw new Error(`No ${kind} data is shipped`); // pdf.js falls back to system fonts
+    return (await wasmBytes(filename)).slice();
+  }
+}
+
+/** Options every getDocument() call shares. */
+const documentOptions = {
+  wasmUrl: WASM_URL,
+  useWorkerFetch: false,
+  BinaryDataFactory: PreloadedBinaryData,
+};
 
 export interface PdfDocument {
   pages: PageSource[];
@@ -31,7 +80,7 @@ export interface PdfDocument {
 
 /** Opens a PDF from its bytes. pdf.js takes ownership of `data`. */
 export async function openPdf(data: Uint8Array): Promise<PdfDocument> {
-  const task = getDocument({ data, worker: pdfWorker(), wasmUrl: WASM_URL });
+  const task = getDocument({ data, worker: pdfWorker(), ...documentOptions });
   try {
     const doc = await task.promise;
     const pageNumbers = Array.from({ length: doc.numPages }, (_, i) => i + 1);
@@ -51,7 +100,7 @@ export async function openPdf(data: Uint8Array): Promise<PdfDocument> {
 
 /** Reads what a PDF is made of: signature, XFA form, scanned or digital pages. */
 export async function inspect(data: Uint8Array): Promise<PdfInfo> {
-  const task = getDocument({ data, worker: pdfWorker(), wasmUrl: WASM_URL });
+  const task = getDocument({ data, worker: pdfWorker(), ...documentOptions });
   try {
     const doc = await task.promise;
     const { info } = (await doc.getMetadata()) as { info: Record<string, unknown> };

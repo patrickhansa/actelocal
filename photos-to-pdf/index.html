@@ -8,6 +8,11 @@
       name="description"
       content="Pune pozele făcute cu telefonul (buletin, diplomă, formulare) într-un singur PDF A4, sub limita portalului. Totul rulează în browser: pozele nu se încarcă nicăieri."
     />
+    <link rel="canonical" href="https://actelocal.pages.dev/photos-to-pdf/" />
+    <meta property="og:title" content="Poze → un singur PDF, sub limită – fără upload" />
+    <meta property="og:description" content="Pozele cu actul, într-un PDF A4 sub limita portalului, direct în browser. Pozele nu pleacă de pe telefon." />
+    <meta property="og:url" content="https://actelocal.pages.dev/photos-to-pdf/" />
+    <meta property="og:locale" content="ro_RO" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script type="module" src="/src/pages/photos-to-pdf.ts"></script>
   </head>
@@ -21,12 +26,56 @@
         Alegi pozele cu actul, le pui în ordine și primești un singur PDF A4, sub limită. Pozele nu pleacă de pe
         dispozitivul tău.
       </p>
-      <div id="app" class="placeholder">
-        <p>Instrumentul e în lucru. Revino în curând.</p>
+
+      <div id="app">
+        <noscript><p class="noscript">Instrumentul are nevoie de JavaScript. Activează-l și reîncarcă pagina.</p></noscript>
       </div>
+
+      <section class="faq">
+        <h2>Întrebări frecvente</h2>
+        <details>
+          <summary>Unde ajung pozele mele?</summary>
+          <p>
+            Nicăieri. Pozele sunt puse în PDF chiar în browserul tău, pe dispozitivul tău. Nu există niciun server care
+            să le primească. <a href="/#verifica">Vezi cum verifici singur.</a>
+          </p>
+        </details>
+        <details>
+          <summary>Ce se întâmplă cu locația din poze?</summary>
+          <p>
+            Pozele de pe telefon conțin date ascunse, ca locul unde au fost făcute și modelul telefonului. În PDF ajunge
+            doar imaginea, fără aceste date.
+          </p>
+        </details>
+        <details>
+          <summary>Cum pun buletinul față-verso pe o singură pagină?</summary>
+          <p>
+            Alege „Două poze pe pagină”, apoi pune întâi poza cu fața și apoi pe cea cu verso. Pe fiecare pagină A4,
+            prima poză stă sus și a doua jos.
+          </p>
+        </details>
+        <details>
+          <summary>Am poze HEIC de pe iPhone.</summary>
+          <p>
+            Dacă alegi pozele pe iPhone, din Safari, ele sunt transformate automat în JPG. Pe calculator, unele browsere nu
+            pot citi HEIC: salvează-le întâi ca JPG.
+          </p>
+        </details>
+        <details>
+          <summary>De ce iese PDF-ul pe A4?</summary>
+          <p>
+            Portalurile și imprimantele lucrează cu A4. O poză făcută „culcat” primește o pagină A4 culcată, ca să ocupe
+            cât mai mult din pagină.
+          </p>
+        </details>
+        <details>
+          <summary>Costă ceva? Îmi trebuie cont?</summary>
+          <p>Nu și nu. ActeLocal este gratuit, fără cont și fără reclame, iar codul sursă este public.</p>
+        </details>
+      </section>
     </main>
     <footer class="site-footer">
-      <p>Totul rulează în browser: fără cont, fără upload, fără server.</p>
+      <p>Totul rulează în browser: fără cont, fără upload, fără server. <a href="/#verifica">Cum verifici</a></p>
       <p><a href="https://github.com/patrickhansa/actelocal">Cod sursă deschis (MIT)</a></p>
     </footer>
   </body>

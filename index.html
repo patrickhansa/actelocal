@@ -8,6 +8,11 @@
       name="description"
       content="Unelte gratuite pentru acte: micșorează un PDF sub limita portalului sau pune pozele cu actul într-un singur PDF. Totul rulează în browser, fișierele nu se încarcă nicăieri."
     />
+    <link rel="canonical" href="https://actelocal.pages.dev/" />
+    <meta property="og:title" content="ActeLocal – actele tale în PDF, sub limită, fără upload" />
+    <meta property="og:description" content="Micșorează PDF-uri și pune pozele cu actele într-un PDF, direct în browser. Gratuit, fără cont, fără upload." />
+    <meta property="og:url" content="https://actelocal.pages.dev/" />
+    <meta property="og:locale" content="ro_RO" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script type="module" src="/src/pages/home.ts"></script>
   </head>
@@ -35,6 +40,31 @@
           </a>
         </li>
       </ul>
+
+      <h2>De ce ActeLocal</h2>
+      <ul class="benefits">
+        <li>Fișierele nu pleacă de pe dispozitivul tău: totul se întâmplă în browser.</li>
+        <li>Gratuit, fără cont și fără reclame.</li>
+        <li>Merge pe telefon și pe calculator, chiar și fără internet după ce s-a încărcat pagina.</li>
+        <li>Alege singur cea mai bună calitate care încape sub limită.</li>
+      </ul>
+
+      <h2 id="verifica">Cum verifici că nu se încarcă nimic</h2>
+      <ol class="steps">
+        <li>
+          <strong>Pe telefon:</strong> deschide unul dintre instrumente, așteaptă câteva secunde să se încarce, apoi pune
+          telefonul în modul avion. Alege fișierul: merge și fără internet.
+        </li>
+        <li>
+          <strong>Pe calculator:</strong> apasă F12, deschide fila „Network” („Rețea”) și folosește un instrument. Nu
+          apare nicio cerere care să trimită fișierul tău.
+        </li>
+        <li>
+          <strong>În cod:</strong> <a href="https://github.com/patrickhansa/actelocal">codul sursă este public</a>. Pagina
+          are și o regulă de securitate (Content-Security-Policy) care îi interzice browserului să trimită date către alte
+          site-uri.
+        </li>
+      </ol>
     </main>
     <footer class="site-footer">
       <p>Totul rulează în browser: fără cont, fără upload, fără server.</p>

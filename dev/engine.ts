@@ -7,7 +7,7 @@ import {
   EngineError,
   inspectPdf,
   photosToPdf,
-  warmUpPdf,
+  warmUp,
   type AttemptLog,
   type EngineOptions,
   type EngineResult,
@@ -38,7 +38,7 @@ if (new URLSearchParams(location.search).has('main-thread')) {
   delete (window as { OffscreenCanvas?: unknown }).OffscreenCanvas;
 }
 
-void warmUpPdf();
+void warmUp({ pdf: true });
 
 let controller: AbortController | null = null;
 
@@ -290,9 +290,10 @@ function toBase64(blob: Blob): Promise<string> {
  */
 async function cspCheck() {
   const results: Record<string, string> = {};
+  const { WASM_URL } = await import('../src/engine/pdf-source');
   for (const name of ['jbig2.wasm', 'openjpeg.wasm', 'qcms_bg.wasm']) {
     try {
-      await WebAssembly.compileStreaming(fetch(`/pdfjs/wasm/${name}`));
+      await WebAssembly.compileStreaming(fetch(WASM_URL + name));
       results[name] = 'compiled';
     } catch (error) {
       results[name] = String(error);

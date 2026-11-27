@@ -75,10 +75,14 @@ export function encoderInfo(): string {
   return imageEncoder().describe();
 }
 
-/** Loads pdf.js and starts its workers in the background, so the first PDF starts sooner. */
-export async function warmUpPdf(): Promise<void> {
+/**
+ * Starts the encoding workers and, with `pdf`, loads pdf.js with its worker and decoders.
+ * Call when the page is idle: the first job then starts at once, and no code needs to be
+ * downloaded while a file is processed (so it works with the connection off).
+ */
+export async function warmUp(options: { pdf?: boolean } = {}): Promise<void> {
   imageEncoder();
-  (await import('./pdf-source')).warmUp();
+  if (options.pdf) (await import('./pdf-source')).warmUp();
 }
 
 async function compressPages(
