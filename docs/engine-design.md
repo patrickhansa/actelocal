@@ -149,10 +149,18 @@ The same scan jobs took 5–7 s before the search learned to jump and abandon, a
 ## 7. Public API, `index.ts`
 
 ```ts
+inspectPdf(file: File): Promise<PdfInfo>   // call on file selection, to warn before compressing (§10)
 compressPdf(file: File, options: EngineOptions): Promise<EngineResult>
 photosToPdf(photos: PhotoInput[], options: EngineOptions & { layout: 'one-per-page' | 'two-per-page' }): Promise<EngineResult>
 warmUpPdf(): Promise<void>   // load pdf.js and start its workers in the background
 encoderInfo(): string        // where JPEG encoding runs: "4 workers" or "main thread"
+
+interface PdfInfo {
+  pageCount: number;
+  signed: boolean;                          // electronic signature: compressing makes an unsigned file
+  xfa: boolean;                             // XFA form (ANAF): its interactive content won't survive
+  kind: 'scanned' | 'digital' | 'mixed';    // from the first, middle and last page
+}
 
 interface PhotoInput { file: File; rotation: 0 | 90 | 180 | 270 }
 
@@ -195,7 +203,8 @@ pdf.js is loaded only when a PDF is opened, so the photo tool never downloads it
 src/engine/
   config.ts           every tunable number
   types.ts            PageSource, EngineOptions, EngineResult, EngineError
-  pdf-source.ts       PDF file → PageSource[]          (the only file that imports pdf.js)
+  pdf-source.ts       PDF file → PageSource[], and inspect()   (the only file that imports pdf.js)
+  classify.ts         scanned or digital page, from a pdf.js operator list
   photo-source.ts     photos → PageSource[], A4 layouts
   raster.ts           draws a page into the canvas, grayscale, snapshot
   encoder.ts          JPEG encoding: worker pool, main-thread fallback
@@ -234,7 +243,7 @@ node scripts/bench.mjs snapshot <file> 1000         # writes the result and each
 PROD=1 node scripts/bench.mjs csp                   # production build + headers: decoders load, uploads blocked
 ```
 
-1. **Unit tests** (23):
+1. **Unit tests** (28):
    - the search against brute force, and how many pages it renders
    - abandoned and failed levels, cancellation, PDF overhead overshoot
    - the photo layout maths
@@ -245,11 +254,17 @@ PROD=1 node scripts/bench.mjs csp                   # production build + headers
    - Renders results back to PNG for checking by eye.
    - With `PROD=1`, runs against a production build served with the real headers. It checks that pdf.js's decoders compile under the CSP and that a request to another origin is blocked by `connect-src`.
 
-**Still to do:**
+**Acceptance check passed** on public-domain scans downloaded for testing (kept in `test-files/web/`, never committed):
 
-- Run the spec's acceptance check on a real multi-page scan: 8–20 MB, about 10 pages, under 1 MB and readable at 100%.
-- Time it on a phone.
-- Test a PDF with JBIG2 or JPEG 2000 images. None of the files tested so far use them.
+| Scan | Target | Result | Time |
+|---|---|---|---|
+| 1926 typewriter manual (Internet Archive), 9 pages, 600 dpi JPEG, **79 MB** | 1 MB | 965 KB at 250 dpi, q 0.55; readable when zoomed | 4.9 s |
+| NASA report, 12 pages, black-and-white CCITT with an OCR layer, 3.7 MB | 1 MB | 906 KB at 100 dpi, q 0.45; readable at 100% | 2.0 s |
+| Internet Archive book, 140 pages, JBIG2 + JPEG 2000, 13.1 MB | 5 MB | 4.75 MB at 100 dpi | 73 s |
+
+The last one exercises pdf.js's WebAssembly decoders. They work, but JPEG 2000 decoding takes about 0.45 s per page.
+
+**Still to do:** time the engine on a phone.
 
 ## 10. Findings from real files
 
@@ -263,7 +278,21 @@ The engine was run on ten everyday PDFs and six phone photos. Scans and photos w
 2. **Digitally signed PDFs lose their signature.** Rasterizing creates a new document, so the electronic signature is gone. 4 of the 10 PDFs were signed (invoices, ANAF forms, company documents). Portals that check signatures will reject the result, so the UI must warn before compressing a signed PDF. If the file already fits, it's returned untouched and the signature survives.
 3. **XFA forms**, which ANAF uses, are rendered from their static fallback. The interactive form data doesn't survive. These are usually signed as well, and the same warning applies.
 
-pdf.js reports both cases (`IsSignaturesPresent`, `IsXFAPresent`), so the engine can detect them before compressing.
+4. **Black-and-white scans** are often stored as CCITT fax or JBIG2 images, which are far more compact for text than any JPEG. Rasterizing them can reach targets only at low settings, or not at all: a 3.7 MB, 12-page NASA scan can't get under 500 KB. A bitonal encoder (CCITT G4 written in JavaScript) would fix this, as a later improvement.
+
+**Detection is implemented** as `inspectPdf()`, so the UI can warn when a file is picked:
+
+- **Signatures and XFA forms:** pdf.js reports them directly (`IsSignaturesPresent`, `IsXFAPresent`).
+- **Scanned or digital:** `classify.ts` reads the operator lists of the first, middle and last page. It tracks how much each drawing transform scales area (the absolute value of its determinant, so no full matrices) and finds the largest image's share of the page. At least half the page means a scanned page. OCR'd scans count as scanned, because the rule ignores text.
+
+Results on 17 files:
+
+- every computer-made document (invoices, contract, paper, boarding pass, ANAF forms) is `digital`
+- every scan (phone app, CCITT, JBIG2 + JPEG 2000, JPEG) is `scanned`
+- a book with an image cover is `mixed`
+- signatures and XFA forms were all detected
+
+It usually takes 5–400 ms. Files with JPEG 2000 images can take several seconds, because pdf.js decodes the sampled pages' images, so the UI should show the warnings when they arrive rather than wait for them.
 
 ## Appendix: TypeScript for C++ readers
 

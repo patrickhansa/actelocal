@@ -1,9 +1,10 @@
 // PDF file → one PageSource per page, rendered by pdf.js. See docs/engine-design.md §3.
 // The only module that imports pdf.js, and it is loaded on demand.
 
-import { AnnotationMode, GlobalWorkerOptions, PDFWorker, getDocument, type PDFDocumentProxy } from 'pdfjs-dist';
+import { AnnotationMode, GlobalWorkerOptions, OPS, PDFWorker, getDocument, type PDFDocumentProxy } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { EngineError, type PageSource } from './types';
+import { SCANNED_PAGE_COVERAGE, largestImageCoverage } from './classify';
+import { EngineError, type PageSource, type PdfInfo } from './types';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -45,6 +46,43 @@ export async function openPdf(data: Uint8Array): Promise<PdfDocument> {
   } catch (error) {
     await task.destroy();
     throw toEngineError(error);
+  }
+}
+
+/** Reads what a PDF is made of: signature, XFA form, scanned or digital pages. */
+export async function inspect(data: Uint8Array): Promise<PdfInfo> {
+  const task = getDocument({ data, worker: pdfWorker(), wasmUrl: WASM_URL });
+  try {
+    const doc = await task.promise;
+    const { info } = (await doc.getMetadata()) as { info: Record<string, unknown> };
+    const samples = [...new Set([1, Math.ceil(doc.numPages / 2), doc.numPages])];
+    const scanned = await Promise.all(
+      samples.map(async (pageNumber) => {
+        const page = await doc.getPage(pageNumber);
+        try {
+          const { fnArray, argsArray } = await page.getOperatorList({
+            intent: 'print',
+            annotationMode: AnnotationMode.ENABLE_STORAGE,
+          });
+          const [x0, y0, x1, y1] = page.view; // crop box, in points
+          const area = Math.abs((x1 - x0) * (y1 - y0));
+          return largestImageCoverage(fnArray, argsArray, area, OPS) >= SCANNED_PAGE_COVERAGE;
+        } finally {
+          page.cleanup();
+        }
+      }),
+    );
+    const scannedCount = scanned.filter(Boolean).length;
+    return {
+      pageCount: doc.numPages,
+      signed: info.IsSignaturesPresent === true,
+      xfa: info.IsXFAPresent === true,
+      kind: scannedCount === samples.length ? 'scanned' : scannedCount === 0 ? 'digital' : 'mixed',
+    };
+  } catch (error) {
+    throw toEngineError(error);
+  } finally {
+    await task.destroy();
   }
 }
 

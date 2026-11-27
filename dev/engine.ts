@@ -5,6 +5,7 @@ import {
   compressPdf,
   encoderInfo,
   EngineError,
+  inspectPdf,
   photosToPdf,
   warmUpPdf,
   type AttemptLog,
@@ -103,30 +104,18 @@ interface BenchConfig {
   grayscale?: boolean;
 }
 
-/** Structural facts about PDFs, from pdf.js, without looking at their content. */
+/** What each PDF is made of, as the engine sees it (inspectPdf), without looking at content. */
 async function inspect(urls: string[]) {
-  await import('../src/engine/pdf-source'); // sets up the pdf.js worker
-  const { getDocument } = await import('pdfjs-dist');
   const report = [];
   for (const url of urls) {
-    const task = getDocument({ data: new Uint8Array(await (await fetch(url)).arrayBuffer()), wasmUrl: '/pdfjs/wasm/' });
+    const name = url.split('/').pop()!;
+    const file = new File([await (await fetch(url)).blob()], name, { type: 'application/pdf' });
+    const start = performance.now();
     try {
-      const doc = await task.promise;
-      const { info } = (await doc.getMetadata()) as { info: Record<string, unknown> };
-      const page = (await doc.getPage(1)).getViewport({ scale: 1 });
-      report.push({
-        file: url.split('/').pop(),
-        pages: doc.numPages,
-        firstPagePt: `${page.width.toFixed(0)}x${page.height.toFixed(0)}`,
-        xfa: info.IsXFAPresent === true,
-        pureXfa: doc.isPureXfa,
-        acroForm: info.IsAcroFormPresent === true,
-        signed: info.IsSignaturesPresent === true,
-      });
+      const info = await inspectPdf(file);
+      report.push({ file: name, MB: +(file.size / 1e6).toFixed(1), ...info, ms: Math.round(performance.now() - start) });
     } catch (error) {
-      report.push({ file: url.split('/').pop(), error: (error as Error).name });
-    } finally {
-      await task.destroy();
+      report.push({ file: name, error: (error as EngineError).code ?? String(error) });
     }
   }
   return report;
@@ -224,7 +213,7 @@ async function snapshot(config: BenchConfig | PhotoBenchConfig) {
   const doc = await openPdf(run.pdf.slice());
   const pages: string[] = [];
   for (const page of doc.pages) {
-    const pxPerPt = 96 / 72;
+    const pxPerPt = (96 / 72) * ((config as { zoom?: number }).zoom ?? 1);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(page.widthPt * pxPerPt);
     canvas.height = Math.round(page.heightPt * pxPerPt);

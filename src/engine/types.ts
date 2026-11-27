@@ -20,6 +20,22 @@ export interface PhotoInput {
 
 export type PhotoLayout = 'one-per-page' | 'two-per-page';
 
+/** What a PDF is made of, to warn before compressing. See docs/engine-design.md §10. */
+export interface PdfInfo {
+  pageCount: number;
+  /** Has an electronic signature. Compressing makes a new, unsigned file. */
+  signed: boolean;
+  /** Contains an XFA form (as ANAF forms do). Its interactive content won't survive. */
+  xfa: boolean;
+  /**
+   * From sampled pages (first, middle, last):
+   * - 'scanned': every sampled page is mostly one image. Compressing works well.
+   * - 'digital': no sampled page is. Text and drawings, which usually grow as images.
+   * - 'mixed': some of each.
+   */
+  kind: 'scanned' | 'digital' | 'mixed';
+}
+
 export interface Progress {
   /** Resolution being tried. */
   dpi: number;

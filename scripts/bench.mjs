@@ -66,14 +66,15 @@ try {
     const [source, targetKb = '1000'] = args;
     const targets = [Number(targetKb) * 1000];
     const grayscale = process.env.GRAY === '1';
+    const zoom = Number(process.env.ZOOM ?? 1); // ZOOM=2: render the result pages at 200%
     // photos:<count>:<layout>[:<exif orientation>]
     const [, count, layout, exif] = source.split(':');
     const config = source.startsWith('photos:')
-      ? { count: Number(count), layout, exif: Number(exif ?? 0), targets, grayscale }
-      : { url: `/test-files/${source}`, targets, grayscale };
+      ? { count: Number(count), layout, exif: Number(exif ?? 0), targets, grayscale, zoom }
+      : { url: `/test-files/${source}`, targets, grayscale, zoom };
     const result = await page.evaluate(`snapshot(${JSON.stringify(config)})`);
     if (result.error) throw new Error(result.error);
-    const name = `${source.replace(/[:.]/g, '-')}-${targetKb}k${grayscale ? '-gray' : ''}`;
+    const name = `${source.split('/').pop().replace(/[:.]/g, '-')}-${targetKb}k${grayscale ? '-gray' : ''}`;
     mkdirSync('test-files/out', { recursive: true });
     writeFileSync(`test-files/out/${name}.pdf`, Buffer.from(result.pdf, 'base64'));
     result.pages.forEach((png, i) => writeFileSync(`test-files/out/${name}-p${i + 1}.png`, Buffer.from(png, 'base64')));

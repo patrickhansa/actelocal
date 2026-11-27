@@ -10,11 +10,22 @@ import {
   type EngineOptions,
   type EngineResult,
   type PageSource,
+  type PdfInfo,
   type PhotoInput,
   type PhotoLayout,
 } from './types';
 
 export * from './types';
+
+/**
+ * What a PDF is made of, so the page can warn before compressing: a signature or an XFA
+ * form won't survive, and digitally made pages usually grow when turned into images.
+ */
+export async function inspectPdf(file: File): Promise<PdfInfo> {
+  if (!(await looksLikePdf(file))) throw new EngineError('invalid-pdf');
+  const { inspect } = await import('./pdf-source');
+  return inspect(new Uint8Array(await file.arrayBuffer()));
+}
 
 /** Shrinks a PDF under `options.targetBytes`. */
 export async function compressPdf(file: File, options: EngineOptions): Promise<EngineResult> {
