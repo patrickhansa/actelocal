@@ -45,7 +45,8 @@ const chrome = spawn(
 
 try {
   const page = await connect();
-  await page.open(`http://localhost:${DEV_PORT}/dev/engine.html`);
+  // MAIN_THREAD=1 forces the encoder's main-thread fallback (no OffscreenCanvas).
+  await page.open(`http://localhost:${DEV_PORT}/dev/engine.html${process.env.MAIN_THREAD === '1' ? '?main-thread' : ''}`);
   const gpu = await page.evaluate(`(() => {
     const gl = document.createElement('canvas').getContext('webgl');
     const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
@@ -78,12 +79,20 @@ try {
     mkdirSync('test-files/out', { recursive: true });
     writeFileSync(`test-files/out/${name}.pdf`, Buffer.from(result.pdf, 'base64'));
     result.pages.forEach((png, i) => writeFileSync(`test-files/out/${name}-p${i + 1}.png`, Buffer.from(png, 'base64')));
-    console.log(`Wrote test-files/out/${name}.pdf and ${result.pages.length} page PNG(s): ${(result.bytes / 1000).toFixed(0)} KB at ${result.dpi} dpi, q ${result.quality}`);
+    const encoding = result.encoding === 'bitonal' ? 'black & white (G4)' : `JPEG q ${result.quality}`;
+    console.log(`Wrote test-files/out/${name}.pdf and ${result.pages.length} page PNG(s): ${(result.bytes / 1000).toFixed(0)} KB at ${result.dpi} dpi, ${encoding}`);
   } else if (command === 'inspect') {
     // inspect <file in test-files>...: page count, XFA, form fields, signatures
     console.table(await page.evaluate(`inspect(${JSON.stringify(args.map((f) => `/test-files/${f}`))})`));
   } else if (command === 'photo-steps') {
     console.table(await page.evaluate(`photoSteps(${JSON.stringify(args[0].split(',').map((f) => `/test-files/${f}`))})`));
+  } else if (command === 'bw-stats') {
+    // bw-stats <file in test-files>...: how black-and-white the sampled pages look
+    const report = await page.evaluate(`bitonalStats(${JSON.stringify(args.map((f) => `/test-files/${f}`))})`);
+    for (const [file, line] of Object.entries(report)) console.log(`${file.padEnd(32)} ${line}`);
+  } else if (command === 'g4') {
+    // Round trip of the G4 encoder through pdf.js's CCITT decoder.
+    console.table(await page.evaluate('g4RoundTrip()'));
   } else if (command === 'csp') {
     console.log(await page.evaluate('cspCheck()'));
   } else if (command === 'encode') {
@@ -100,7 +109,7 @@ try {
       ? realPhotos
         ? { urls: first.split(',').map((f) => `/test-files/${f}`), count: 0, layout: second, targets, grayscale }
         : { count: Number(first), layout: second, targets, grayscale }
-      : { url: `/test-files/${first}`, targets, grayscale };
+      : { url: `/test-files/${first}`, targets, grayscale, bitonal: process.env.BITONAL !== '0' };
     // PROFILE=1: sample the page's main thread and list where its time went.
     if (process.env.PROFILE === '1') {
       await page.send('Profiler.enable');
@@ -118,7 +127,9 @@ try {
     const label = isPhotos ? `${realPhotos ? first.split(',').length : first} ${realPhotos ? '' : 'generated '}photos, ${second}` : first;
     console.log(`${label}${grayscale ? ' (grayscale)' : ''}: ${(result.inputBytes / 1e6).toFixed(1)} MB, encoding on ${result.encoder}`);
     for (const run of result.runs) {
-      const outcome = run.error ?? `${(run.bytes / 1000).toFixed(0)} KB at ${run.dpi} dpi, q ${run.quality}`;
+      const outcome =
+        run.error ??
+        `${(run.bytes / 1000).toFixed(0)} KB at ${run.dpi} dpi, ${run.encoding === 'bitonal' ? 'black & white (G4)' : `JPEG q ${run.quality}`}`;
       console.log(
         `  target ${run.targetBytes / 1000} KB -> ${outcome} in ${(run.ms / 1000).toFixed(2)} s` +
           ` (main thread blocked >50 ms: ${run.longTasks}x, longest ${run.longestTaskMs.toFixed(0)} ms)`,

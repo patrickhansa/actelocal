@@ -62,6 +62,11 @@ export interface EngineOptions {
   /** Maximum output size in bytes, e.g. 1_000_000. */
   targetBytes: number;
   grayscale: boolean;
+  /**
+   * Allow black-and-white (CCITT G4) encoding for PDFs that already look black and white;
+   * far smaller than JPEG for text. Default true.
+   */
+  bitonal?: boolean;
   /** Called before each page is rendered. */
   onProgress?: (progress: Progress) => void;
   /** Called after each resolution attempt. Development use. */
@@ -76,9 +81,11 @@ export interface EngineResult {
   pageCount: number;
   /** Chosen resolution (0 if unchanged). */
   dpi: number;
-  /** Chosen JPEG quality (0 if unchanged). */
+  /** Chosen JPEG quality (0 if unchanged, 1 in black-and-white mode, where it doesn't apply). */
   quality: number;
-  /** Page 1 as JPEG, for the readability preview. Null if unchanged. */
+  /** 'bitonal': pages are black and white (CCITT G4); pages with colour, if any, stay JPEG. */
+  encoding: 'jpeg' | 'bitonal' | 'unchanged';
+  /** Page 1 as an image (JPEG, or PNG in black-and-white mode) for the readability preview. Null if unchanged. */
   preview: Blob | null;
   /** Size of page 1 in points, to show the preview as large as a PDF viewer at 100% would. */
   firstPageSize: { widthPt: number; heightPt: number };

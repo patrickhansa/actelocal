@@ -32,6 +32,12 @@ const describeAttempt = (a: AttemptLog) =>
   `  ${String(a.dpi).padStart(3)} dpi: ${a.pagesRendered} page(s) rendered, ` +
   `fits at [${a.fittingQualities.join(', ')}], render ${a.renderMs.toFixed(0)} ms, encode ${a.encodeMs.toFixed(0)} ms`;
 
+// ?main-thread hides OffscreenCanvas, forcing the encoder's main-thread fallback (as on iOS
+// before 16.4). Must run before the engine first creates its encoder.
+if (new URLSearchParams(location.search).has('main-thread')) {
+  delete (window as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+}
+
 void warmUpPdf();
 
 let controller: AbortController | null = null;
@@ -102,6 +108,7 @@ interface BenchConfig {
   url: string;
   targets: number[];
   grayscale?: boolean;
+  bitonal?: boolean;
 }
 
 /** What each PDF is made of, as the engine sees it (inspectPdf), without looking at content. */
@@ -189,9 +196,14 @@ async function bench(config: BenchConfig | PhotoBenchConfig) {
       longestTaskMs: Math.max(0, ...longTasks),
     });
     try {
-      const r = await job({ targetBytes, grayscale: config.grayscale ?? false, onAttempt: (a) => attempts.push(a) });
+      const r = await job({
+        targetBytes,
+        grayscale: config.grayscale ?? false,
+        bitonal: (config as BenchConfig).bitonal ?? true,
+        onAttempt: (a) => attempts.push(a),
+      });
       const pdf = (config as { keepPdf?: boolean }).keepPdf ? r.pdf : undefined;
-      runs.push({ targetBytes, ...timing(), bytes: r.pdf.length, dpi: r.dpi, quality: r.quality, attempts, pdf });
+      runs.push({ targetBytes, ...timing(), bytes: r.pdf.length, dpi: r.dpi, quality: r.quality, encoding: r.encoding, attempts, pdf });
     } catch (error) {
       runs.push({ targetBytes, ...timing(), error: String((error as EngineError).code ?? error), attempts });
     } finally {
@@ -296,6 +308,97 @@ async function cspCheck() {
   return results;
 }
 
+/**
+ * Round trip of the G4 encoder through pdf.js's own CCITT decoder: encode test images,
+ * wrap each in a PDF, render it 1:1 and count pixels that differ from the input.
+ */
+async function g4RoundTrip() {
+  const { encodeG4 } = await import('../src/engine/g4');
+  const { assemblePdf } = await import('../src/engine/assemble');
+  const { openPdf } = await import('../src/engine/pdf-source');
+  const rand = (() => {
+    let seed = 7;
+    return () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+  })();
+  const make = (w: number, h: number, pixel: (x: number, y: number) => boolean) => {
+    const bits = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) bits[y * w + x] = pixel(x, y) ? 1 : 0;
+    return { w, h, bits };
+  };
+  const text = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1700;
+    canvas.height = 500;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, 1700, 500);
+    ctx.fillStyle = '#000';
+    for (let i = 0; i < 9; i++) {
+      ctx.font = `${12 + i * 6}px serif`;
+      ctx.fillText('Pack my box with five dozen liquor jugs 0123456789 ăâîșț', 10, 30 + i * 52);
+    }
+    const rgba = ctx.getImageData(0, 0, 1700, 500).data;
+    return make(1700, 500, (x, y) => rgba[(y * 1700 + x) * 4] < 128);
+  };
+  const cases: Record<string, { w: number; h: number; bits: Uint8Array }> = {
+    'random noise 317x211': make(317, 211, () => rand() < 0.5),
+    'sparse dots 1000x500': make(1000, 500, () => rand() < 0.02),
+    'checkerboard 256x256': make(256, 256, (x, y) => (x + y) % 2 === 0),
+    'vertical stripes 400x300': make(400, 300, (x) => x % 4 < 2),
+    'diagonals 300x300': make(300, 300, (x, y) => (x + y) % 9 < 2 || (x - y + 900) % 13 < 1),
+    'long runs 6000x6': make(6000, 6, (x, y) => [x === 5000, true, x >= 3000, x < 2600, x % 2700 < 5, false][y]),
+    'one pixel wide 1x100': make(1, 100, () => rand() < 0.5),
+    'all black 64x64': make(64, 64, () => true),
+    'all white 64x64': make(64, 64, () => false),
+    'text 1700x500': text(),
+  };
+
+  const report: Record<string, string> = {};
+  for (const [name, { w, h, bits }] of Object.entries(cases)) {
+    const data = encodeG4(bits, w, h);
+    const pdf = await assemblePdf([{ widthPt: w, heightPt: h }], [
+      { format: 'g4', width: w, height: h, blob: new Blob([data as Uint8Array<ArrayBuffer>]) },
+    ]);
+    const doc = await openPdf(pdf);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    await doc.pages[0].draw(ctx, 1);
+    await doc.close();
+    const rgba = ctx.getImageData(0, 0, w, h).data;
+    let wrong = 0;
+    for (let p = 0; p < w * h; p++) if ((rgba[p * 4] < 128 ? 1 : 0) !== bits[p]) wrong++;
+    report[name] = `${wrong} of ${w * h} pixels differ (${data.length} bytes, ${((data.length * 8) / (w * h)).toFixed(3)} bits/pixel)`;
+  }
+  return report;
+}
+
+/** Mid-gray and colour shares of the sampled pages (first, middle, last) at 200 dpi, per PDF. */
+async function bitonalStats(urls: string[]) {
+  const { openPdf } = await import('../src/engine/pdf-source');
+  const { Rasterizer } = await import('../src/engine/raster');
+  const report: Record<string, string> = {};
+  for (const url of urls) {
+    const doc = await openPdf(new Uint8Array(await (await fetch(url)).arrayBuffer()));
+    const raster = new Rasterizer(false);
+    const n = doc.pages.length;
+    const parts = [];
+    for (const index of [...new Set([0, Math.floor(n / 2), n - 1])]) {
+      const page = await raster.render(doc.pages[index], 200);
+      const { midFraction, colourFraction } = await page.analyze();
+      page.release();
+      parts.push(`p${index + 1}: mid ${(midFraction * 100).toFixed(2)}% colour ${(colourFraction * 100).toFixed(3)}%`);
+    }
+    raster.dispose();
+    await doc.close();
+    report[url.split('/').pop()!] = parts.join(' | ');
+  }
+  return report;
+}
+
 /** Times each step of drawing photos, and counts main-thread stalls per step. */
 async function photoSteps(urls: string[]) {
   const files = await Promise.all(urls.map(async (url) => (await fetch(url)).blob()));
@@ -333,4 +436,4 @@ async function photoSteps(urls: string[]) {
   return steps;
 }
 
-Object.assign(window, { bench, snapshot, inspect, photoSteps, makeSample, encodeBench, cspCheck });
+Object.assign(window, { bench, snapshot, inspect, g4RoundTrip, bitonalStats, photoSteps, makeSample, encodeBench, cspCheck });

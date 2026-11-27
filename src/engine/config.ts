@@ -29,6 +29,27 @@ export const ABANDON_MARGIN = 1.1;
  */
 export const MAX_PARALLEL_ENCODE_PIXELS = 20_000_000;
 
+/**
+ * Black-and-white (CCITT G4) mode, for documents that already look black and white. A few
+ * sample pages are rendered at BITONAL_ANALYSIS_DPI; if each has at most these shares of
+ * mid-gray and coloured pixels, every page is thresholded and encoded as G4.
+ * Measured at 200 dpi (docs/engine-design.md §11): black-and-white scans have 0.5–2.2%
+ * mid-gray and no colour at all; everything else tested had at least 0.12% colour.
+ */
+export const BITONAL_ANALYSIS_DPI = 200;
+export const BITONAL_MAX_MID_FRACTION = 0.03;
+export const BITONAL_MAX_COLOUR_FRACTION = 0.0005;
+
+/**
+ * In black-and-white mode, a page with colour (over BITONAL_MAX_COLOUR_FRACTION, say a
+ * blue stamp on a page that wasn't sampled) stays JPEG, at this quality.
+ */
+export const BITONAL_PAGE_MAX_COLOUR_FRACTION = BITONAL_MAX_COLOUR_FRACTION;
+export const BITONAL_COLOUR_PAGE_QUALITY = 0.65;
+
+/** The single "quality" the search tries in black-and-white mode, where JPEG quality doesn't apply. */
+export const BITONAL_QUALITY = 1;
+
 /** PDF points per inch. */
 export const PT_PER_INCH = 72;
 

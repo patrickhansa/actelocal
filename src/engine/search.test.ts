@@ -58,28 +58,40 @@ const documents: Record<string, number[]> = {
 
 describe('searchSettings', () => {
   for (const [name, complexities] of Object.entries(documents)) {
-    it(`matches brute force for ${name}, across targets from 30 KB to 30 MB`, async () => {
-      for (let target = 30_000; target <= 30_000_000; target = Math.round(target * 1.17)) {
-        const expected = expectedSettings(complexities, target);
-        const { input } = fakeDocument(complexities, target);
-        if (expected === null) {
-          await expect(searchSettings(input)).rejects.toMatchObject({ code: 'target-unreachable' });
-          continue;
+    for (const window of [1, 3]) {
+      it(`matches brute force for ${name}, targets 30 KB to 30 MB, ${window} page(s) in flight`, async () => {
+        for (let target = 30_000; target <= 30_000_000; target = Math.round(target * 1.17)) {
+          const expected = expectedSettings(complexities, target);
+          const { input } = fakeDocument(complexities, target, { pagesInFlight: () => window });
+          if (expected === null) {
+            await expect(searchSettings(input)).rejects.toMatchObject({ code: 'target-unreachable' });
+            continue;
+          }
+          const result = await searchSettings(input);
+          expect({ dpi: result.dpi, quality: result.quality }, `target ${target}`).toEqual(expected);
+          expect(result.pdf.length).toBeLessThanOrEqual(target);
+          expect(result.jpegs).toHaveLength(complexities.length);
         }
-        const result = await searchSettings(input);
-        expect({ dpi: result.dpi, quality: result.quality }, `target ${target}`).toEqual(expected);
-        expect(result.pdf.length).toBeLessThanOrEqual(target);
-        expect(result.jpegs).toHaveLength(complexities.length);
-      }
-    });
+      });
+    }
   }
 
-  it('releases every page it renders, whatever the outcome', async () => {
-    for (const target of [100_000, 1_000_000, 100_000_000]) {
-      const { input, renders } = fakeDocument(documents['ten similar scans'], target);
-      await searchSettings(input).catch(() => undefined);
-      expect(renders.every((r) => r.released)).toBe(true);
+  it('releases every page it renders, whatever the outcome, with any number in flight', async () => {
+    for (const window of [1, 4]) {
+      for (const target of [100_000, 1_000_000, 100_000_000]) {
+        const { input, renders } = fakeDocument(documents['ten similar scans'], target, { pagesInFlight: () => window });
+        await searchSettings(input).catch(() => undefined);
+        expect(renders.every((r) => r.released)).toBe(true);
+      }
     }
+  });
+
+  it('works with a single "quality", as black-and-white mode uses', async () => {
+    const pages = documents['ten similar scans'];
+    const { input } = fakeDocument(pages, 2_000_000, { qualities: { normal: [0.55], lastResort: [0.55] } });
+    const result = await searchSettings(input);
+    expect(result.quality).toBe(0.55);
+    expect(result.pdf.length).toBeLessThanOrEqual(2_000_000);
   });
 
   it('renders at most about twice the page count for similar pages, at any target', async () => {

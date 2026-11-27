@@ -167,6 +167,7 @@ interface PhotoInput { file: File; rotation: 0 | 90 | 180 | 270 }
 interface EngineOptions {
   targetBytes: number;                      // e.g. 1_000_000
   grayscale: boolean;
+  bitonal?: boolean;                        // allow black-and-white (G4) mode for PDFs (§11), default true
   onProgress?: (p: Progress) => void;       // before each page: { dpi, attempt, page, pageCount }
   onAttempt?: (a: AttemptLog) => void;      // after each resolution attempt (dev harness)
   signal?: AbortSignal;                     // cancellation, checked between pages
@@ -177,7 +178,8 @@ interface EngineResult {
   pageCount: number;
   dpi: number;                              // chosen level (0 if unchanged)
   quality: number;                          // chosen JPEG quality (0 if unchanged)
-  preview: Blob | null;                     // page 1 as JPEG, for the readability check
+  encoding: 'jpeg' | 'bitonal' | 'unchanged';
+  preview: Blob | null;                     // page 1 as JPEG (PNG in black-and-white mode), for the readability check
   firstPageSize: { widthPt; heightPt };     // to show the preview as large as a viewer at 100% would
   unchanged: boolean;                       // the input already fit and grayscale was off
 }
@@ -207,8 +209,11 @@ src/engine/
   classify.ts         scanned or digital page, from a pdf.js operator list
   photo-source.ts     photos → PageSource[], A4 layouts
   raster.ts           draws a page into the canvas, grayscale, snapshot
-  encoder.ts          JPEG encoding: worker pool, main-thread fallback
-  encode-worker.ts    the worker: snapshot → OffscreenCanvas → JPEG
+  encoder.ts          encoding: worker pool, main-thread fallback
+  encode-worker.ts    the worker; runs encode-job.ts
+  encode-job.ts       one job on one snapshot: JPEG, black and white (G4), analyse, preview
+  bitonal.ts          black-and-white statistics and Otsu thresholding
+  g4.ts               CCITT Group 4 encoder (§11)
   search.ts           §5; render and encode are passed in, so it runs without a browser
   assemble.ts         JPEGs → PDF                       (the only file that imports pdf-lib)
   index.ts            public API
@@ -216,6 +221,7 @@ src/engine/
 dev/engine.html       harness: run the engine on any file, see every attempt (dev server only)
 dev/sample.ts         generates a synthetic scanned document for benchmarks
 scripts/bench.mjs     drives headless Chrome to benchmark, snapshot results and check the CSP
+scripts/check-g4-tables.mjs   compares the G4 code tables with libtiff's
 ```
 
 **pdf.js (`pdfjs-dist` 6.5, Apache-2.0)**
@@ -243,7 +249,7 @@ node scripts/bench.mjs snapshot <file> 1000         # writes the result and each
 PROD=1 node scripts/bench.mjs csp                   # production build + headers: decoders load, uploads blocked
 ```
 
-1. **Unit tests** (28):
+1. **Unit tests** (46):
    - the search against brute force, and how many pages it renders
    - abandoned and failed levels, cancellation, PDF overhead overshoot
    - the photo layout maths
@@ -278,7 +284,7 @@ The engine was run on ten everyday PDFs and six phone photos. Scans and photos w
 2. **Digitally signed PDFs lose their signature.** Rasterizing creates a new document, so the electronic signature is gone. 4 of the 10 PDFs were signed (invoices, ANAF forms, company documents). Portals that check signatures will reject the result, so the UI must warn before compressing a signed PDF. If the file already fits, it's returned untouched and the signature survives.
 3. **XFA forms**, which ANAF uses, are rendered from their static fallback. The interactive form data doesn't survive. These are usually signed as well, and the same warning applies.
 
-4. **Black-and-white scans** are often stored as CCITT fax or JBIG2 images, which are far more compact for text than any JPEG. Rasterizing them can reach targets only at low settings, or not at all: a 3.7 MB, 12-page NASA scan can't get under 500 KB. A bitonal encoder (CCITT G4 written in JavaScript) would fix this, as a later improvement.
+4. **Black-and-white scans** are often stored as CCITT fax or JBIG2 images, which are far more compact for text than any JPEG. With JPEG alone, a 3.7 MB, 12-page NASA scan couldn't get under 500 KB. Black-and-white mode (§11) fixes this.
 
 **Detection is implemented** as `inspectPdf()`, so the UI can warn when a file is picked:
 
@@ -293,6 +299,53 @@ Results on 17 files:
 - signatures and XFA forms were all detected
 
 It usually takes 5–400 ms. Files with JPEG 2000 images can take several seconds, because pdf.js decodes the sampled pages' images, so the UI should show the warnings when they arrive rather than wait for them.
+
+## 11. Black-and-white mode (CCITT G4)
+
+For PDFs that already look black and white, pages are thresholded to 1 bit per pixel and compressed with CCITT Group 4 (ITU-T T.6). That's the compression fax machines and scanners use, and every PDF reader understands it (`/CCITTFaxDecode`, `K = -1`). For text it's typically 5–10× smaller than JPEG, and it's lossless at the chosen resolution, so the search can keep a much higher resolution.
+
+**When it's used** (`index.ts`, `bitonal.ts`):
+
+- Before the search, the first, middle and last page are rendered at 200 dpi and measured for mid-gray pixels (brightness 64–191) and coloured pixels (channel spread over 48).
+- Black-and-white mode is used only if every sample has at most 3% mid-gray and 0.05% colour. Measured on real files:
+
+  | Documents | Mid-gray | Colour | Mode |
+  |---|---|---|---|
+  | Black-and-white scans | 0.5–2.2% | exactly 0% | black and white |
+  | Internet Archive books (tinted paper) | — | 3% and up | JPEG |
+  | The 1926 typewriter manual (photos, sepia) | — | 43% and up | JPEG |
+  | Phone-app scan with a stamp | — | 0.35% | JPEG |
+  | Synthetic scan with a blue stamp | — | 0.12% | JPEG |
+  | Every digital PDF | — | 1% and up | JPEG |
+
+- A page with any colour in a black-and-white document (a blue stamp on a page that wasn't sampled) stays JPEG at quality 0.65.
+- Photos never use this mode. `EngineOptions.bitonal: false` turns it off.
+
+**How:**
+
+- **Thresholding:** the worker thresholds each page at Otsu's cut, the brightness that best separates the dark and light classes. The cut is clamped to 80–180, so paper noise on a blank page stays white.
+- **Encoding:** `g4.ts` (about 120 lines of logic) implements T.6. Each row is coded against the row above, in pass, vertical (±3 pixels) or horizontal mode.
+- **Search:** it runs as before with a single "quality". A black-and-white page is one job on one worker, so up to 4 pages encode at once, capped by the same pixel limit. Results are still taken in page order.
+- **Preview:** for page 1 it's a PNG of the thresholded page.
+
+**How it's verified:**
+
+1. **Tables:** the code tables are written as bit strings, so they can be compared with the standard by eye.
+   - Unit tests check they're prefix-free and have the sizes T.4 specifies.
+   - `scripts/check-g4-tables.mjs` compares all 208 codes with libtiff's independent `t4.h`: all match.
+2. **Hand-worked encodings:** unit tests compare bit-exact output for horizontal, vertical and pass mode.
+3. **Round trip through pdf.js's own CCITT decoder** (`node scripts/bench.mjs g4`, also on the production build): 10 test images decode with **0 differing pixels**. The images are random noise, 1-pixel checkerboards and stripes, runs over 2560 pixels, a 1-pixel-wide image, all black, all white and rendered text.
+
+**Results** (desktop):
+
+| NASA scan | Target | JPEG only | Black and white |
+|---|---|---|---|
+| 12 pages, 3.7 MB | 500 KB | impossible | 483 KB at 300 dpi, 2.1 s |
+| same | 300 KB | impossible | 273 KB at 175 dpi, 3.4 s; crisp at 100% |
+| 22 pages, 1.1 MB | 500 KB | impossible | 489 KB at 150 dpi, 6.5 s |
+| 487 pages, 24.5 MB | 10 MB | impossible | 8.5 MB at 100 dpi, 43 s |
+
+Black-and-white pages take longer than JPEG ones, mostly because these documents vary from page to page: a resolution that almost fits can only be ruled out by encoding nearly every page. The page never froze in any of these runs. On the main-thread fallback (no `OffscreenCanvas`, iOS before 16.4) the results are identical, but thresholding and encoding freeze the page for up to 350 ms at a time.
 
 ## Appendix: TypeScript for C++ readers
 

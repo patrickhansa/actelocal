@@ -1,9 +1,16 @@
 // Public API of the engine. See docs/engine-design.md §7.
 
 import { assemblePdf } from './assemble';
-import { jpegEncoder } from './encoder';
+import {
+  BITONAL_ANALYSIS_DPI,
+  BITONAL_MAX_COLOUR_FRACTION,
+  BITONAL_MAX_MID_FRACTION,
+  BITONAL_QUALITY,
+  MAX_PARALLEL_ENCODE_PIXELS,
+} from './config';
+import { imageEncoder, type EncodedImage } from './encoder';
 import { photoPages } from './photo-source';
-import { Rasterizer } from './raster';
+import { Rasterizer, pixelsPerPoint } from './raster';
 import { searchSettings } from './search';
 import {
   EngineError,
@@ -41,12 +48,13 @@ export async function compressPdf(file: File, options: EngineOptions): Promise<E
         pageCount: doc.pages.length,
         dpi: 0,
         quality: 0,
+        encoding: 'unchanged',
         preview: null,
         firstPageSize: sizeOf(doc.pages[0]),
         unchanged: true,
       };
     }
-    return await compressPages(doc.pages, options);
+    return await compressPages(doc.pages, options, options.bitonal !== false);
   } finally {
     await doc.close();
   }
@@ -58,43 +66,90 @@ export async function photosToPdf(
   options: EngineOptions & { layout: PhotoLayout },
 ): Promise<EngineResult> {
   if (photos.length === 0) throw new EngineError('no-pages');
-  return compressPages(await photoPages(photos, options.layout), options);
+  // Photos are never black-and-white documents in the sense that matters here: no G4.
+  return compressPages(await photoPages(photos, options.layout), options, false);
 }
 
-/** Where JPEG encoding runs in this browser, for diagnostics: e.g. "3 workers" or "main thread". */
+/** Where encoding runs in this browser, for diagnostics: e.g. "3 workers" or "main thread". */
 export function encoderInfo(): string {
-  return jpegEncoder().describe();
+  return imageEncoder().describe();
 }
 
-/** Loads pdf.js and starts its worker in the background, so the first PDF starts sooner. */
+/** Loads pdf.js and starts its workers in the background, so the first PDF starts sooner. */
 export async function warmUpPdf(): Promise<void> {
-  jpegEncoder();
+  imageEncoder();
   (await import('./pdf-source')).warmUp();
 }
 
-async function compressPages(pages: readonly PageSource[], options: EngineOptions): Promise<EngineResult> {
+async function compressPages(
+  pages: readonly PageSource[],
+  options: EngineOptions,
+  allowBitonal: boolean,
+): Promise<EngineResult> {
   const raster = new Rasterizer(options.grayscale);
   try {
-    const result = await searchSettings<Blob>({
+    const bitonal = allowBitonal && (await looksBlackAndWhite(pages, raster));
+    raster.mode = bitonal ? 'bitonal' : 'jpeg';
+    const result = await searchSettings<EncodedImage>({
       pageCount: pages.length,
       targetBytes: options.targetBytes,
       renderPage: (index, dpi) => raster.render(pages[index], dpi),
-      assemble: (jpegs) => assemblePdf(pages, jpegs),
+      assemble: (images) => assemblePdf(pages, images),
+      qualities: bitonal ? { normal: [BITONAL_QUALITY], lastResort: [BITONAL_QUALITY] } : undefined,
+      // A black-and-white page is one job on one worker, so encode several pages at once.
+      // (A JPEG page already spreads its qualities across the workers.)
+      pagesInFlight: bitonal ? (dpi) => pagesInFlight(pages[0], dpi) : undefined,
       onProgress: options.onProgress,
       onAttempt: options.onAttempt,
       signal: options.signal,
     });
+    const first = result.jpegs[0];
     return {
       pdf: result.pdf,
       pageCount: pages.length,
       dpi: result.dpi,
       quality: result.quality,
-      preview: result.jpegs[0],
+      encoding: bitonal ? 'bitonal' : 'jpeg',
+      preview: first.format === 'jpeg' ? first.blob : await bitonalPreview(raster, pages[0], result.dpi),
       firstPageSize: sizeOf(pages[0]),
       unchanged: false,
     };
   } finally {
     raster.dispose();
+  }
+}
+
+/**
+ * Whether the document already looks black and white: renders the first, middle and last
+ * page and checks they have almost no mid-gray or coloured pixels.
+ */
+async function looksBlackAndWhite(pages: readonly PageSource[], raster: Rasterizer): Promise<boolean> {
+  const samples = [...new Set([0, Math.floor(pages.length / 2), pages.length - 1])];
+  for (const index of samples) {
+    const page = await raster.render(pages[index], BITONAL_ANALYSIS_DPI);
+    try {
+      const { midFraction, colourFraction } = await page.analyze();
+      if (midFraction > BITONAL_MAX_MID_FRACTION || colourFraction > BITONAL_MAX_COLOUR_FRACTION) return false;
+    } finally {
+      page.release();
+    }
+  }
+  return true;
+}
+
+/** Pages that may encode at once: one per worker, capped by pixels in flight (memory). */
+function pagesInFlight(page: PageSource, dpi: number): number {
+  const pxPerPt = pixelsPerPoint(page, dpi);
+  const pixels = page.widthPt * pxPerPt * page.heightPt * pxPerPt;
+  return Math.max(1, Math.min(imageEncoder().parallelism(), Math.floor(MAX_PARALLEL_ENCODE_PIXELS / pixels)));
+}
+
+async function bitonalPreview(raster: Rasterizer, page: PageSource, dpi: number): Promise<Blob> {
+  const rendered = await raster.render(page, dpi);
+  try {
+    return await rendered.bitonalPreview();
+  } finally {
+    rendered.release();
   }
 }
 

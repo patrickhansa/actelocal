@@ -34,6 +34,10 @@ export interface SearchInput<J extends Sized> {
   renderPage: (index: number, dpi: number) => Promise<RenderedPage<J>>;
   /** Build the output PDF from one JPEG per page. */
   assemble: (jpegs: readonly J[]) => Promise<Uint8Array>;
+  /** Qualities to try above the last level, and at it; QUALITIES and LAST_RESORT_QUALITIES by default. */
+  qualities?: { normal: readonly number[]; lastResort: readonly number[] };
+  /** How many pages may encode at once at `dpi` (results still come in page order). Default 1. */
+  pagesInFlight?: (dpi: number) => number;
   onProgress?: (progress: Progress) => void;
   onAttempt?: (attempt: AttemptLog) => void;
   signal?: AbortSignal;
@@ -131,8 +135,9 @@ async function tryResolution<J extends Sized>(
   const isLast = level === LEVELS_DPI.length - 1;
 
   // Quality → running total and JPEGs. A Map keeps insertion order, so it iterates ascending.
+  const allowed = input.qualities ?? { normal: QUALITIES, lastResort: LAST_RESORT_QUALITIES };
   const alive = new Map<number, { total: number; jpegs: J[] }>();
-  for (const quality of isLast ? LAST_RESORT_QUALITIES : QUALITIES) alive.set(quality, { total: 0, jpegs: [] });
+  for (const quality of isLast ? allowed.lastResort : allowed.normal) alive.set(quality, { total: 0, jpegs: [] });
   const lowest = () => alive.values().next().value!;
   const projection = (bytes: number, pages: number) => (bytes / pages) * pageCount;
 
@@ -143,65 +148,109 @@ async function tryResolution<J extends Sized>(
     return outcome;
   };
 
-  let nextRender: Promise<RenderedPage<J>> | null = renderPage(0, dpi);
+  const lowestQuality = alive.keys().next().value!;
+
+  /** Adds one page's encodes to the running totals; returns an outcome if the level failed. */
+  const addPage = (page: number, qualities: readonly number[], jpegs: readonly J[]): LevelOutcome<J> | null => {
+    for (const [i, quality] of qualities.entries()) {
+      const candidate = alive.get(quality);
+      if (!candidate) continue; // dropped after this page was sent off to encode
+      if (candidate.total + jpegs[i].size > budget) {
+        if (quality === lowestQuality) {
+          const estimatedJpegBytes = projection(candidate.total + jpegs[i].size, page + 1);
+          return { kind: 'failed', estimatedJpegBytes, estimatedPdfBytes: estimatedJpegBytes + pdfOverhead(pageCount) };
+        }
+        // A higher quality never makes a smaller JPEG, so every higher quality is out too.
+        for (const q of [...alive.keys()]) if (q >= quality) alive.delete(q);
+        break;
+      }
+      candidate.total += jpegs[i].size;
+      candidate.jpegs.push(jpegs[i]);
+    }
+    log.pagesRendered = page + 1;
+    return null;
+  };
+
+  // Pages render one after another (there is one canvas) while up to `window` of them
+  // encode at once; results are taken strictly in page order.
+  const window = Math.max(1, input.pagesInFlight?.(dpi) ?? 1);
+  const inFlight: { rendered: RenderedPage<J>; qualities: number[]; encoded: Promise<J[]> }[] = [];
+  let rendering: Promise<RenderedPage<J>> | null = renderPage(0, dpi);
+  let renderedCount = 0;
+
+  /** Waits for the page being rendered and starts rendering the one after it. */
+  const nextRendered = async (): Promise<RenderedPage<J>> => {
+    const start = now();
+    const rendered = await rendering!;
+    log.renderMs += now() - start;
+    renderedCount++;
+    rendering = renderedCount < pageCount ? renderPage(renderedCount, dpi) : null;
+    // A failure surfaces when awaited; this only stops it being reported as unhandled meanwhile.
+    rendering?.catch(() => undefined);
+    return rendered;
+  };
+
   try {
-    for (let page = 0; page < pageCount; page++) {
+    let page = 0;
+    if (mayAbandon) {
+      // First page: encode only the lowest quality and give up early on a hopeless level.
       throwIfCancelled(signal);
-      onProgress?.({ dpi, attempt, page: page + 1, pageCount });
-
-      let start = now();
-      const rendered = await nextRender!;
-      nextRender = null;
-      log.renderMs += now() - start;
-      // Draw the next page while this one encodes. (A failure surfaces when it is awaited;
-      // the empty catch only stops the browser reporting it as unhandled in the meantime.)
-      nextRender = page + 1 < pageCount ? renderPage(page + 1, dpi) : null;
-      nextRender?.catch(() => undefined);
-
-      start = now();
+      onProgress?.({ dpi, attempt, page: 1, pageCount });
+      const first = await nextRendered();
       const qualities = [...alive.keys()];
+      const start = now();
       let jpegs: J[];
       try {
-        if (mayAbandon && page === 0) {
-          // First page: encode only the lowest quality and give up early on a hopeless level.
-          const [first] = await rendered.encode(qualities.slice(0, 1));
-          if (projection(first.size, 1) > budget * ABANDON_MARGIN) {
-            log.encodeMs += now() - start;
-            log.pagesRendered = 1;
-            return finish({ kind: 'abandoned', estimatedJpegBytes: projection(first.size, 1) });
-          }
-          jpegs = [first, ...(await rendered.encode(qualities.slice(1)))];
-        } else {
-          jpegs = await rendered.encode(qualities);
+        const [lowestJpeg] = await first.encode(qualities.slice(0, 1));
+        if (projection(lowestJpeg.size, 1) > budget * ABANDON_MARGIN) {
+          log.encodeMs += now() - start;
+          log.pagesRendered = 1;
+          return finish({ kind: 'abandoned', estimatedJpegBytes: projection(lowestJpeg.size, 1) });
         }
+        jpegs = [lowestJpeg, ...(await first.encode(qualities.slice(1)))];
+      } finally {
+        first.release();
+      }
+      log.encodeMs += now() - start;
+      const failed = addPage(0, qualities, jpegs);
+      if (failed) return finish(failed);
+      page = 1;
+    }
+
+    for (; page < pageCount; page++) {
+      throwIfCancelled(signal);
+      onProgress?.({ dpi, attempt, page: page + 1, pageCount });
+      while (renderedCount < pageCount && inFlight.length < window) {
+        const rendered = await nextRendered();
+        const qualities = [...alive.keys()];
+        const encoded = rendered.encode(qualities);
+        encoded.catch(() => undefined); // awaited below, in page order
+        inFlight.push({ rendered, qualities, encoded });
+      }
+
+      const { rendered, qualities, encoded } = inFlight.shift()!;
+      const start = now();
+      let jpegs: J[];
+      try {
+        jpegs = await encoded;
       } finally {
         rendered.release();
       }
       log.encodeMs += now() - start;
-      log.pagesRendered = page + 1;
-
-      for (const [i, quality] of qualities.entries()) {
-        const candidate = alive.get(quality)!;
-        if (candidate.total + jpegs[i].size > budget) {
-          if (i === 0) {
-            const estimatedJpegBytes = projection(candidate.total + jpegs[i].size, page + 1);
-            return finish({ kind: 'failed', estimatedJpegBytes, estimatedPdfBytes: estimatedJpegBytes + pdfOverhead(pageCount) });
-          }
-          // A higher quality never makes a smaller JPEG, so every higher quality is out too.
-          for (const q of qualities.slice(i)) alive.delete(q);
-          break;
-        }
-        candidate.total += jpegs[i].size;
-        candidate.jpegs.push(jpegs[i]);
-      }
+      const failed = addPage(page, qualities, jpegs);
+      if (failed) return finish(failed);
 
       if (mayAbandon && projection(lowest().total, page + 1) > budget * ABANDON_MARGIN) {
         return finish({ kind: 'abandoned', estimatedJpegBytes: projection(lowest().total, page + 1) });
       }
     }
   } finally {
-    // Never leave a render running into a canvas the next attempt will reuse, or unreleased.
-    (await nextRender?.catch(() => null))?.release();
+    // Leave nothing running into a canvas the next attempt reuses, and nothing unreleased.
+    for (const { rendered, encoded } of inFlight.splice(0)) {
+      await encoded.catch(() => undefined);
+      rendered.release();
+    }
+    (await rendering?.catch(() => null))?.release();
   }
 
   // Every quality left fits the budget for all pages. Take the highest one whose assembled
