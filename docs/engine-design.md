@@ -4,7 +4,7 @@ Status: **implemented** (spec step 2, plus the photo-page part of step 3). Code:
 
 ## 1. Summary
 
-The engine turns a list of pages into one PDF no larger than a target size, at the best readability that fits. Each page is drawn into a canvas (a pixel buffer), saved as a JPEG, and the JPEGs are packed into a new PDF. The engine chooses one resolution and one JPEG quality for the whole document by measuring real JPEG sizes, never by guessing. It runs entirely in the browser and keeps at most two rendered pages in memory.
+The engine turns a list of pages into one PDF no larger than a target size, at the best readability that fits. Each page is drawn into a canvas (a pixel buffer), saved as a JPEG, and the JPEGs are packed into a new PDF. The engine chooses one resolution and one JPEG quality for the whole document by measuring real JPEG sizes, never by guessing. It runs entirely in the browser and keeps at most two rendered pages in memory. JPEG encoding runs in Web Workers, so the page stays responsive.
 
 ## 2. Pipeline
 
@@ -51,17 +51,24 @@ Input: the photos in the user's order, each with a rotation of 0, 90, 180 or 270
 - If decoding fails, the engine throws `unsupported-image` with the file name. HEIC on non-Apple browsers fails this way until stretch goal 1 adds HEIC support.
 - GPS and other EXIF data disappear automatically, because the output contains only new JPEGs made from canvas pixels.
 
-## 4. Render and encode, `raster.ts`
+## 4. Render and encode, `raster.ts` and `encoder.ts`
 
-**Two canvases are used in turn**, so page *n+1* is drawn into one while page *n* is still encoding from the other. For each page:
+One canvas is reused for every page:
 
 1. Resize the canvas to the page size at the chosen resolution.
 2. Fill it white. A canvas starts transparent, and the JPEG encoder turns transparent pixels black.
 3. `source.draw(ctx, pxPerPt)`.
 4. If grayscale is on, fill the whole canvas with gray using the `color` blend mode. That keeps each pixel's brightness and takes away its colour in one draw call, which runs on the GPU in all browsers. It replaces the per-pixel loop from the first draft.
-5. Encode the JPEGs with `canvas.toBlob('image/jpeg', quality)`. The browser copies the canvas when the call is made and encodes on another thread. All qualities still needed for a page are encoded at once, up to 20 million pixels in flight (`MAX_PARALLEL_ENCODE_PIXELS`), which caps the extra memory at about 80 MB on phones. A `null` result means the browser couldn't allocate memory, and becomes `render-failed`.
+5. Take a snapshot of the canvas with `createImageBitmap`, which is fast and asynchronous. The canvas is then free for the next page while this one encodes.
 
-When the job ends, both canvases are resized to 0 × 0. Otherwise iOS Safari keeps their memory until the page is closed.
+**JPEG encoding runs in Web Workers** (`encode-worker.ts`).
+
+- **Why:** profiling showed that Chrome's `canvas.toBlob` does much of its work on the main thread, up to half of a job's main-thread time, and freezes the page for up to 450 ms at a time.
+- **How:** each worker draws a copy of the snapshot onto an `OffscreenCanvas` and calls `convertToBlob`. A pool of up to 4 workers is created once per visit. The qualities a page needs are split across the workers, each with its own copy of the snapshot. Copies in flight are capped at 20 million pixels (`MAX_PARALLEL_ENCODE_PIXELS`), about 80 MB.
+- **Fallback:** without `OffscreenCanvas` (iOS before 16.4), or if a worker fails, encoding falls back to `toBlob` on the main thread.
+- **Diagnostics:** `encoderInfo()` reports which encoder is active.
+
+When the job ends, the canvas is resized to 0 × 0. Otherwise iOS Safari keeps its memory until the page is closed.
 
 ## 5. Choosing resolution and quality, `search.ts`
 
@@ -118,15 +125,18 @@ return the highest level that fit, at its highest fitting quality
 
 ### Measured speed
 
-Desktop (Ryzen 7, headless Chrome), with a synthetic 10-page scan of 15.5 MB:
+Desktop (Ryzen 7 with Radeon 780M, headless Chrome with GPU). "Freezes" counts main-thread tasks over 50 ms:
 
-| Target | Result | Time | Pages rendered |
-|---|---|---|---|
-| 1 MB | 883 KB at 100 dpi, q 0.35 | 1.2 s | 12 |
-| 2 MB | 1999 KB at 125 dpi, q 0.75 | 2.1–2.3 s | 22 |
-| 5 MB | 4881 KB at 250 dpi, q 0.65 | 4.8 s | 20 |
+| Input | Target | Result | Time | Freezes |
+|---|---|---|---|---|
+| Synthetic scan, 10 pages, 15.5 MB | 1 MB | 883 KB at 100 dpi, q 0.35 | 1.2–1.4 s | 0 |
+| same | 2 MB | 1999 KB at 125 dpi, q 0.75 | 2.3 s | 0 |
+| same | 5 MB | 4881 KB at 250 dpi, q 0.65 | 3.4 s | 0 |
+| 6 real phone photos, 50 MB, one per page | 2 MB | 1907 KB at 175 dpi | 2.1–2.5 s | 3–7, ≤ 125 ms |
+| 2 real phone photos, two per page | 500 KB | 491 KB at 250 dpi | 1.0 s | 0–1 |
+| Real phone-app scan, 1 page | 100 KB | 96 KB at 150 dpi | 0.4 s | 0 |
 
-A plain walk from 300 dpi downwards took 5–7 s for the same jobs. Phones are expected to be 3–5× slower. The worst cases are near misses, where a level fails only on the last page, because those have to be measured to the end. The 1 MB output above is still readable at 100% zoom, small print included.
+The same scan jobs took 5–7 s before the search learned to jump and abandon, and froze the page for up to 450 ms before encoding moved to workers. Phones are expected to be 3–5× slower. The worst cases are near misses, where a level fails only on the last page, because those have to be measured to the end. The 1 MB output above is still readable at 100% zoom, small print included.
 
 ## 6. Building the PDF, `assemble.ts`
 
@@ -141,7 +151,8 @@ A plain walk from 300 dpi downwards took 5–7 s for the same jobs. Phones are e
 ```ts
 compressPdf(file: File, options: EngineOptions): Promise<EngineResult>
 photosToPdf(photos: PhotoInput[], options: EngineOptions & { layout: 'one-per-page' | 'two-per-page' }): Promise<EngineResult>
-warmUpPdf(): Promise<void>   // load pdf.js and start its worker in the background
+warmUpPdf(): Promise<void>   // load pdf.js and start its workers in the background
+encoderInfo(): string        // where JPEG encoding runs: "4 workers" or "main thread"
 
 interface PhotoInput { file: File; rotation: 0 | 90 | 180 | 270 }
 
@@ -186,7 +197,9 @@ src/engine/
   types.ts            PageSource, EngineOptions, EngineResult, EngineError
   pdf-source.ts       PDF file → PageSource[]          (the only file that imports pdf.js)
   photo-source.ts     photos → PageSource[], A4 layouts
-  raster.ts           two canvases, grayscale, parallel JPEG encoding
+  raster.ts           draws a page into the canvas, grayscale, snapshot
+  encoder.ts          JPEG encoding: worker pool, main-thread fallback
+  encode-worker.ts    the worker: snapshot → OffscreenCanvas → JPEG
   search.ts           §5; render and encode are passed in, so it runs without a browser
   assemble.ts         JPEGs → PDF                       (the only file that imports pdf-lib)
   index.ts            public API
@@ -221,7 +234,7 @@ node scripts/bench.mjs snapshot <file> 1000         # writes the result and each
 PROD=1 node scripts/bench.mjs csp                   # production build + headers: decoders load, uploads blocked
 ```
 
-1. **Unit tests** (22):
+1. **Unit tests** (23):
    - the search against brute force, and how many pages it renders
    - abandoned and failed levels, cancellation, PDF overhead overshoot
    - the photo layout maths
@@ -234,9 +247,23 @@ PROD=1 node scripts/bench.mjs csp                   # production build + headers
 
 **Still to do:**
 
-- Run the spec's acceptance check on real scans: 8–20 MB, about 10 pages, under 1 MB and readable at 100%.
+- Run the spec's acceptance check on a real multi-page scan: 8–20 MB, about 10 pages, under 1 MB and readable at 100%.
 - Time it on a phone.
-- Test a PDF with JBIG2 or JPEG 2000 images. The synthetic scan uses plain JPEG, so it doesn't exercise the decoders.
+- Test a PDF with JBIG2 or JPEG 2000 images. None of the files tested so far use them.
+
+## 10. Findings from real files
+
+The engine was run on ten everyday PDFs and six phone photos. Scans and photos work as intended, but three kinds of file need handling in the UI:
+
+1. **Digitally born PDFs grow when rasterized.** Invoices, contracts and papers store text as text, which is far smaller than a picture of it.
+   - A 58-page, 0.9 MB paper can't get under 5 MB as images.
+   - A 6-page, 1.1 MB contract can't get under 500 KB.
+
+   For these files the engine either reports `target-unreachable` or reaches the target only at the lowest settings. A size-reduction path that keeps text (recompress only the embedded images) would help them, and it's the natural next feature after the MVP.
+2. **Digitally signed PDFs lose their signature.** Rasterizing creates a new document, so the electronic signature is gone. 4 of the 10 PDFs were signed (invoices, ANAF forms, company documents). Portals that check signatures will reject the result, so the UI must warn before compressing a signed PDF. If the file already fits, it's returned untouched and the signature survives.
+3. **XFA forms**, which ANAF uses, are rendered from their static fallback. The interactive form data doesn't survive. These are usually signed as well, and the same warning applies.
+
+pdf.js reports both cases (`IsSignaturesPresent`, `IsXFAPresent`), so the engine can detect them before compressing.
 
 ## Appendix: TypeScript for C++ readers
 

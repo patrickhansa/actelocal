@@ -3,6 +3,7 @@
 
 import {
   compressPdf,
+  encoderInfo,
   EngineError,
   photosToPdf,
   warmUpPdf,
@@ -80,7 +81,7 @@ function showResult(result: EngineResult, ms: number) {
       ? `Already under the target: returned unchanged (${result.pageCount} pages).`
       : `Result: ${kb(result.pdf.length)}, ${result.pageCount} pages, ${result.dpi} dpi, quality ${result.quality}`,
   );
-  log(`Total time: ${(ms / 1000).toFixed(2)} s`);
+  log(`Total time: ${(ms / 1000).toFixed(2)} s, JPEG encoding on ${encoderInfo()}`);
 
   const blob = new Blob([result.pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' });
   download.href = URL.createObjectURL(blob);
@@ -102,7 +103,38 @@ interface BenchConfig {
   grayscale?: boolean;
 }
 
+/** Structural facts about PDFs, from pdf.js, without looking at their content. */
+async function inspect(urls: string[]) {
+  await import('../src/engine/pdf-source'); // sets up the pdf.js worker
+  const { getDocument } = await import('pdfjs-dist');
+  const report = [];
+  for (const url of urls) {
+    const task = getDocument({ data: new Uint8Array(await (await fetch(url)).arrayBuffer()), wasmUrl: '/pdfjs/wasm/' });
+    try {
+      const doc = await task.promise;
+      const { info } = (await doc.getMetadata()) as { info: Record<string, unknown> };
+      const page = (await doc.getPage(1)).getViewport({ scale: 1 });
+      report.push({
+        file: url.split('/').pop(),
+        pages: doc.numPages,
+        firstPagePt: `${page.width.toFixed(0)}x${page.height.toFixed(0)}`,
+        xfa: info.IsXFAPresent === true,
+        pureXfa: doc.isPureXfa,
+        acroForm: info.IsAcroFormPresent === true,
+        signed: info.IsSignaturesPresent === true,
+      });
+    } catch (error) {
+      report.push({ file: url.split('/').pop(), error: (error as Error).name });
+    } finally {
+      await task.destroy();
+    }
+  }
+  return report;
+}
+
 interface PhotoBenchConfig {
+  /** Photo URLs to use; generated photos when absent. */
+  urls?: string[];
   count: number;
   targets: number[];
   layout: PhotoLayout;
@@ -135,6 +167,15 @@ async function bench(config: BenchConfig | PhotoBenchConfig) {
     const file = new File([blob], config.url.split('/').pop()!, { type: 'application/pdf' });
     inputBytes = file.size;
     job = (options) => compressPdf(file, options);
+  } else if (config.urls) {
+    const photos = await Promise.all(
+      config.urls.map(async (url) => ({
+        file: new File([await (await fetch(url)).blob()], url.split('/').pop()!, { type: 'image/jpeg' }),
+        rotation: 0 as const,
+      })),
+    );
+    inputBytes = photos.reduce((sum, p) => sum + p.file.size, 0);
+    job = (options) => photosToPdf(photos, { ...options, layout: config.layout });
   } else {
     const plain = await makeScanPdfPageJpeg();
     const jpeg = config.exif ? withExifOrientation(plain, config.exif) : plain;
@@ -168,7 +209,7 @@ async function bench(config: BenchConfig | PhotoBenchConfig) {
       observer.disconnect();
     }
   }
-  return { inputBytes, runs };
+  return { inputBytes, encoder: encoderInfo(), runs };
 }
 
 /**
@@ -266,4 +307,41 @@ async function cspCheck() {
   return results;
 }
 
-Object.assign(window, { bench, snapshot, makeSample, encodeBench, cspCheck });
+/** Times each step of drawing photos, and counts main-thread stalls per step. */
+async function photoSteps(urls: string[]) {
+  const files = await Promise.all(urls.map(async (url) => (await fetch(url)).blob()));
+  const steps: Record<string, { ms: number; longTasks: number; longestMs: number }> = {};
+  const step = async (name: string, work: () => Promise<unknown>) => {
+    const long: number[] = [];
+    const observer = new PerformanceObserver((list) => list.getEntries().forEach((e) => long.push(e.duration)));
+    observer.observe({ type: 'longtask' });
+    const start = performance.now();
+    await work();
+    await new Promise((r) => setTimeout(r, 50)); // let long-task entries arrive
+    observer.disconnect();
+    steps[name] = { ms: performance.now() - start - 50, longTasks: long.length, longestMs: Math.max(0, ...long) };
+  };
+  const canvas = document.createElement('canvas');
+  canvas.width = 1447;
+  canvas.height = 2046;
+  const ctx = canvas.getContext('2d', { alpha: false })!;
+  const bitmaps: ImageBitmap[] = [];
+  await step('measure via <img>', () =>
+    Promise.all(files.map((f) => new Promise((r) => { const i = new Image(); i.onload = r; i.src = URL.createObjectURL(f); }))),
+  );
+  await step('createImageBitmap resized', async () => {
+    for (const f of files) bitmaps.push(await createImageBitmap(f, { imageOrientation: 'from-image', resizeWidth: 1300, resizeHeight: 975, resizeQuality: 'high' }));
+  });
+  await step('createImageBitmap full size', async () => {
+    for (const f of files) (await createImageBitmap(f, { imageOrientation: 'from-image' })).close();
+  });
+  await step('drawImage resized bitmap', async () => {
+    for (const b of bitmaps) ctx.drawImage(b, 0, 0);
+  });
+  await step('snapshot canvas', async () => {
+    for (let i = 0; i < files.length; i++) (await createImageBitmap(canvas)).close();
+  });
+  return steps;
+}
+
+Object.assign(window, { bench, snapshot, inspect, photoSteps, makeSample, encodeBench, cspCheck });

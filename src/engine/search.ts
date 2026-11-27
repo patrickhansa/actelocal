@@ -16,18 +16,22 @@ export interface Sized {
   readonly size: number;
 }
 
-/** Encodes one rendered page as a JPEG at `quality` (0..1). */
-export type Encode<J extends Sized> = (quality: number) => Promise<J>;
+/** One page rendered at one resolution. */
+export interface RenderedPage<J extends Sized> {
+  /** Encodes the page as JPEG at each quality (0..1), in order. Can be called more than once. */
+  encode(qualities: readonly number[]): Promise<J[]>;
+  /** Frees the page's pixels. */
+  release(): void;
+}
 
 export interface SearchInput<J extends Sized> {
   pageCount: number;
   targetBytes: number;
   /**
    * Render page `index` (0-based) at `dpi`. The search renders the next page while the
-   * previous one is still encoding, so the returned encoder must stay valid until the
-   * render after next has started (double buffering).
+   * previous one is still encoding, and releases every page it rendered.
    */
-  renderPage: (index: number, dpi: number) => Promise<Encode<J>>;
+  renderPage: (index: number, dpi: number) => Promise<RenderedPage<J>>;
   /** Build the output PDF from one JPEG per page. */
   assemble: (jpegs: readonly J[]) => Promise<Uint8Array>;
   onProgress?: (progress: Progress) => void;
@@ -139,32 +143,39 @@ async function tryResolution<J extends Sized>(
     return outcome;
   };
 
-  let nextRender: Promise<Encode<J>> | null = renderPage(0, dpi);
+  let nextRender: Promise<RenderedPage<J>> | null = renderPage(0, dpi);
   try {
     for (let page = 0; page < pageCount; page++) {
       throwIfCancelled(signal);
       onProgress?.({ dpi, attempt, page: page + 1, pageCount });
 
       let start = now();
-      const encode = await nextRender!;
+      const rendered = await nextRender!;
+      nextRender = null;
       log.renderMs += now() - start;
-      // Draw the next page while this one encodes.
+      // Draw the next page while this one encodes. (A failure surfaces when it is awaited;
+      // the empty catch only stops the browser reporting it as unhandled in the meantime.)
       nextRender = page + 1 < pageCount ? renderPage(page + 1, dpi) : null;
+      nextRender?.catch(() => undefined);
 
       start = now();
-      let qualities = [...alive.keys()];
+      const qualities = [...alive.keys()];
       let jpegs: J[];
-      if (mayAbandon && page === 0) {
-        // First page: encode only the lowest quality and give up early on a hopeless level.
-        const first = await encode(qualities[0]);
-        if (projection(first.size, 1) > budget * ABANDON_MARGIN) {
-          log.encodeMs += now() - start;
-          log.pagesRendered = 1;
-          return finish({ kind: 'abandoned', estimatedJpegBytes: projection(first.size, 1) });
+      try {
+        if (mayAbandon && page === 0) {
+          // First page: encode only the lowest quality and give up early on a hopeless level.
+          const [first] = await rendered.encode(qualities.slice(0, 1));
+          if (projection(first.size, 1) > budget * ABANDON_MARGIN) {
+            log.encodeMs += now() - start;
+            log.pagesRendered = 1;
+            return finish({ kind: 'abandoned', estimatedJpegBytes: projection(first.size, 1) });
+          }
+          jpegs = [first, ...(await rendered.encode(qualities.slice(1)))];
+        } else {
+          jpegs = await rendered.encode(qualities);
         }
-        jpegs = [first, ...(await Promise.all(qualities.slice(1).map((quality) => encode(quality))))];
-      } else {
-        jpegs = await Promise.all(qualities.map((quality) => encode(quality)));
+      } finally {
+        rendered.release();
       }
       log.encodeMs += now() - start;
       log.pagesRendered = page + 1;
@@ -189,8 +200,8 @@ async function tryResolution<J extends Sized>(
       }
     }
   } finally {
-    // Never leave a render running into a canvas the next attempt will reuse.
-    await nextRender?.catch(() => undefined);
+    // Never leave a render running into a canvas the next attempt will reuse, or unreleased.
+    (await nextRender?.catch(() => null))?.release();
   }
 
   // Every quality left fits the budget for all pages. Take the highest one whose assembled

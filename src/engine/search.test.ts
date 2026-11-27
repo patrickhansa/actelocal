@@ -13,14 +13,21 @@ const jpegSize = (complexity: number, dpi: number, quality: number) =>
 const STRUCTURE_BYTES = 700; // what the fake assembler adds; below pdfOverhead() as in reality
 
 function fakeDocument(complexities: number[], targetBytes: number, extra: Partial<SearchInput<Sized>> = {}) {
-  const renders: { page: number; dpi: number }[] = [];
+  const renders: { page: number; dpi: number; released: boolean }[] = [];
   const attempts: AttemptLog[] = [];
   const input: SearchInput<Sized> = {
     pageCount: complexities.length,
     targetBytes,
     renderPage: async (page, dpi) => {
-      renders.push({ page, dpi });
-      return async (quality) => ({ size: jpegSize(complexities[page], dpi, quality) });
+      const render = { page, dpi, released: false };
+      renders.push(render);
+      return {
+        encode: async (qualities) => qualities.map((q) => ({ size: jpegSize(complexities[page], dpi, q) })),
+        release: () => {
+          expect(render.released, 'released twice').toBe(false);
+          render.released = true;
+        },
+      };
     },
     assemble: async (jpegs) => new Uint8Array(jpegs.reduce((sum, j) => sum + j.size, 0) + STRUCTURE_BYTES),
     onAttempt: (attempt) => attempts.push(attempt),
@@ -66,6 +73,14 @@ describe('searchSettings', () => {
       }
     });
   }
+
+  it('releases every page it renders, whatever the outcome', async () => {
+    for (const target of [100_000, 1_000_000, 100_000_000]) {
+      const { input, renders } = fakeDocument(documents['ten similar scans'], target);
+      await searchSettings(input).catch(() => undefined);
+      expect(renders.every((r) => r.released)).toBe(true);
+    }
+  });
 
   it('renders at most about twice the page count for similar pages, at any target', async () => {
     const pages = documents['ten similar scans'];

@@ -1,6 +1,7 @@
 // Public API of the engine. See docs/engine-design.md §7.
 
 import { assemblePdf } from './assemble';
+import { jpegEncoder } from './encoder';
 import { photoPages } from './photo-source';
 import { Rasterizer } from './raster';
 import { searchSettings } from './search';
@@ -49,8 +50,14 @@ export async function photosToPdf(
   return compressPages(await photoPages(photos, options.layout), options);
 }
 
+/** Where JPEG encoding runs in this browser, for diagnostics: e.g. "3 workers" or "main thread". */
+export function encoderInfo(): string {
+  return jpegEncoder().describe();
+}
+
 /** Loads pdf.js and starts its worker in the background, so the first PDF starts sooner. */
 export async function warmUpPdf(): Promise<void> {
+  jpegEncoder();
   (await import('./pdf-source')).warmUp();
 }
 

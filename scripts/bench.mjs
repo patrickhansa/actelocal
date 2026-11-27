@@ -35,15 +35,23 @@ if (PROD) {
   await server.listen();
 }
 const profile = mkdtempSync(join(tmpdir(), 'actelocal-bench-'));
+// GPU=1 asks headless Chrome to use the real GPU, closer to what visitors' browsers do.
+const gpuFlags = process.env.GPU === '1' ? ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=d3d11'] : [];
 const chrome = spawn(
   CHROME,
-  ['--headless=new', `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${profile}`, '--no-first-run', 'about:blank'],
+  ['--headless=new', ...gpuFlags, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${profile}`, '--no-first-run', 'about:blank'],
   { stdio: 'ignore' },
 );
 
 try {
   const page = await connect();
   await page.open(`http://localhost:${DEV_PORT}/dev/engine.html`);
+  const gpu = await page.evaluate(`(() => {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+    return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'none';
+  })()`);
+  console.log(`GPU: ${gpu}`);
 
   if (command === 'sample') {
     const pages = Number(args[0] ?? 10);
@@ -70,6 +78,11 @@ try {
     writeFileSync(`test-files/out/${name}.pdf`, Buffer.from(result.pdf, 'base64'));
     result.pages.forEach((png, i) => writeFileSync(`test-files/out/${name}-p${i + 1}.png`, Buffer.from(png, 'base64')));
     console.log(`Wrote test-files/out/${name}.pdf and ${result.pages.length} page PNG(s): ${(result.bytes / 1000).toFixed(0)} KB at ${result.dpi} dpi, q ${result.quality}`);
+  } else if (command === 'inspect') {
+    // inspect <file in test-files>...: page count, XFA, form fields, signatures
+    console.table(await page.evaluate(`inspect(${JSON.stringify(args.map((f) => `/test-files/${f}`))})`));
+  } else if (command === 'photo-steps') {
+    console.table(await page.evaluate(`photoSteps(${JSON.stringify(args[0].split(',').map((f) => `/test-files/${f}`))})`));
   } else if (command === 'csp') {
     console.log(await page.evaluate('cspCheck()'));
   } else if (command === 'encode') {
@@ -80,12 +93,29 @@ try {
     const [first, second, ...rest] = args;
     const targetsKb = isPhotos ? rest : [second, ...rest].filter(Boolean);
     const targets = (targetsKb.length ? targetsKb : ['500', '1000', '2000', '5000']).map((kb) => Number(kb) * 1000);
+    // photos <count> <layout>: generated photos; photos <a.jpg,b.jpg> <layout>: files in test-files
+    const realPhotos = isPhotos && /\.jpe?g/i.test(first);
     const config = isPhotos
-      ? { count: Number(first), layout: second, targets, grayscale }
+      ? realPhotos
+        ? { urls: first.split(',').map((f) => `/test-files/${f}`), count: 0, layout: second, targets, grayscale }
+        : { count: Number(first), layout: second, targets, grayscale }
       : { url: `/test-files/${first}`, targets, grayscale };
+    // PROFILE=1: sample the page's main thread and list where its time went.
+    if (process.env.PROFILE === '1') {
+      await page.send('Profiler.enable');
+      await page.send('Profiler.setSamplingInterval', { interval: 200 });
+      await page.send('Profiler.start');
+    }
+    // TRACE=1: record a performance trace and break down every main-thread task over 50 ms.
+    if (process.env.TRACE === '1') await page.startTrace();
     const result = await page.evaluate(`bench(${JSON.stringify(config)})`);
-    const label = isPhotos ? `${first} generated photos, ${second}` : first;
-    console.log(`${label}${grayscale ? ' (grayscale)' : ''}: ${(result.inputBytes / 1e6).toFixed(1)} MB`);
+    if (process.env.PROFILE === '1') {
+      const { profile } = await page.send('Profiler.stop');
+      printProfile(profile);
+    }
+    if (process.env.TRACE === '1') printLongTasks(await page.stopTrace());
+    const label = isPhotos ? `${realPhotos ? first.split(',').length : first} ${realPhotos ? '' : 'generated '}photos, ${second}` : first;
+    console.log(`${label}${grayscale ? ' (grayscale)' : ''}: ${(result.inputBytes / 1e6).toFixed(1)} MB, encoding on ${result.encoder}`);
     for (const run of result.runs) {
       const outcome = run.error ?? `${(run.bytes / 1000).toFixed(0)} KB at ${run.dpi} dpi, q ${run.quality}`;
       console.log(
@@ -109,6 +139,40 @@ try {
   rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
+/** Prints the functions with the most main-thread self time in a CPU profile. */
+function printProfile(profile) {
+  const byNode = new Map(profile.nodes.map((n) => [n.id, n]));
+  const selfMs = new Map();
+  profile.timeDeltas.forEach((delta, i) => {
+    const { callFrame } = byNode.get(profile.samples[i]);
+    const file = callFrame.url.split('/').pop()?.split('?')[0] || 'native';
+    const key = `${callFrame.functionName || '(anonymous)'}  [${file}:${callFrame.lineNumber + 1}]`;
+    selfMs.set(key, (selfMs.get(key) ?? 0) + delta / 1000);
+  });
+  const total = [...selfMs.values()].reduce((a, b) => a + b, 0);
+  console.log(`  main thread profile (${total.toFixed(0)} ms sampled), top self time:`);
+  for (const [key, ms] of [...selfMs].sort((a, b) => b[1] - a[1]).slice(0, 14)) {
+    console.log(`    ${ms.toFixed(0).padStart(6)} ms  ${key}`);
+  }
+}
+
+/** For each main-thread task over 50 ms in a trace, prints its longest child events. */
+function printLongTasks(events) {
+  const main = events.find((e) => e.name === 'thread_name' && e.args?.name === 'CrRendererMain');
+  if (!main) return console.log('  no renderer main thread in trace');
+  const onMain = events.filter((e) => e.pid === main.pid && e.tid === main.tid && e.ph === 'X' && e.dur);
+  const tasks = onMain.filter((e) => e.name === 'RunTask' && e.dur > 50_000);
+  console.log(`  ${tasks.length} main-thread task(s) over 50 ms:`);
+  for (const task of tasks) {
+    const children = onMain
+      .filter((e) => e !== task && e.ts >= task.ts && e.ts + e.dur <= task.ts + task.dur && e.dur > 5_000)
+      .sort((a, b) => b.dur - a.dur)
+      .slice(0, 5)
+      .map((e) => `${e.name}${e.args?.data?.functionName ? `(${e.args.data.functionName})` : ''} ${(e.dur / 1000).toFixed(0)}ms`);
+    console.log(`    ${(task.dur / 1000).toFixed(0)} ms: ${children.join(', ') || '(no child events)'}`);
+  }
+}
+
 /** Minimal DevTools-protocol client for the first page target. */
 async function connect() {
   let target;
@@ -129,9 +193,15 @@ async function connect() {
   });
   let nextId = 0;
   const pending = new Map();
+  let traceEvents = [];
+  let traceDone = null;
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
-    if (message.id && pending.has(message.id)) {
+    if (message.method === 'Tracing.dataCollected') {
+      traceEvents.push(...message.params.value);
+    } else if (message.method === 'Tracing.tracingComplete') {
+      traceDone?.(traceEvents);
+    } else if (message.id && pending.has(message.id)) {
       pending.get(message.id)(message);
       pending.delete(message.id);
     } else if (message.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(message.params.type)) {
@@ -153,7 +223,20 @@ async function connect() {
   };
   await send('Runtime.enable');
   return {
+    send,
     evaluate,
+    async startTrace() {
+      traceEvents = [];
+      await send('Tracing.start', {
+        categories: 'devtools.timeline,disabled-by-default-devtools.timeline,v8.execute,blink,gpu',
+        transferMode: 'ReportEvents',
+      });
+    },
+    async stopTrace() {
+      const done = new Promise((resolve) => (traceDone = resolve));
+      await send('Tracing.end');
+      return done;
+    },
     async open(url) {
       await send('Page.navigate', { url });
       for (let i = 0; i < 200; i++) {
