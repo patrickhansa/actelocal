@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+Thumbs.db
+
+# Real or dummy documents used for testing never go in the repo
+test-files/
+
+# Private planning notes
+Spec *.md
