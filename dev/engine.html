@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Engine harness (dev)</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script type="module" src="./engine.ts"></script>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; max-width: 960px; }
+      fieldset { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; border: 1px solid #ccc; border-radius: 8px; }
+      pre { background: #f3f3f3; padding: 12px; border-radius: 8px; overflow-x: auto; min-height: 4em; }
+      .preview { overflow: auto; max-height: 80vh; border: 1px solid #ccc; border-radius: 8px; }
+      .preview img { display: block; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #161615; color: #ececea; }
+        pre { background: #222; }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Engine harness</h1>
+    <p>Dev only. A PDF goes to <code>compressPdf</code>; images go to <code>photosToPdf</code>.</p>
+    <fieldset>
+      <input id="files" type="file" multiple accept="application/pdf,image/*" />
+      <label>Target
+        <select id="target">
+          <option value="500000">500 KB</option>
+          <option value="1000000" selected>1 MB</option>
+          <option value="2000000">2 MB</option>
+          <option value="5000000">5 MB</option>
+          <option value="10000000">10 MB</option>
+        </select>
+      </label>
+      <label><input id="gray" type="checkbox" /> grayscale</label>
+      <label>Photos
+        <select id="layout">
+          <option value="one-per-page">one per page</option>
+          <option value="two-per-page">two per page</option>
+        </select>
+      </label>
+      <button id="run">Run</button>
+      <button id="cancel" disabled>Cancel</button>
+    </fieldset>
+    <pre id="log"></pre>
+    <p><a id="download" hidden>Download result</a></p>
+    <div class="preview"><img id="preview" alt="" /></div>
+  </body>
+</html>

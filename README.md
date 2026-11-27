@@ -6,10 +6,13 @@ Free Romanian-language tools that get scans and phone photos under a portal's up
 
 ```sh
 npm install
-npm run dev       # local dev server
+npm run dev       # local dev server; /dev/engine.html runs the engine on any file
+npm test          # unit tests
 npm run build     # type-check and build to dist/
 npm run preview   # serve dist/ with the production headers from public/_headers
 ```
+
+The compression engine lives in `src/engine/` and is described in [docs/engine-design.md](docs/engine-design.md). `scripts/bench.mjs` benchmarks it in headless Chrome (see the comment at its top).
 
 ## Deploy (Cloudflare Pages)
 
